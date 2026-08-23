@@ -1,0 +1,17 @@
+const { defineConfig } = require('vite');
+const vue = require('@vitejs/plugin-vue');
+const path = require('path');
+
+module.exports = defineConfig({
+    plugins: [vue()],
+    root: path.join(__dirname, 'renderer'),
+    base: './',
+    build: {
+        outDir: path.join(__dirname, 'dist-ui'),
+        emptyOutDir: true,
+    },
+    server: {
+        port: 5173,
+        strictPort: true,
+    },
+});

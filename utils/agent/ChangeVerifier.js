@@ -1,0 +1,278 @@
+const fs = require('fs');
+const vm = require('vm');
+
+const STOP = new Set([
+    'the', 'and', 'for', 'with', 'this', 'that', 'from', 'into', 'your', 'please',
+    'tạo', 'thêm', 'sửa', 'viết', 'giúp', 'dùm', 'vào', 'cho', 'của', 'các',
+    'một', 'này', 'kia', 'làm', 'file', 'code', 'trong', 'đó', 'với', 'nhé',
+    'giúp', 'project', 'style', 'styles', 'class', 'css',
+]);
+
+function unique(list) {
+    const out = [];
+    for (const item of list || []) {
+        if (item && !out.includes(item)) out.push(item);
+    }
+    return out;
+}
+
+function extractHints(task) {
+    const text = String(task || '');
+    const quoted = [...text.matchAll(/["'`“”]([^"'`“”]{2,80})["'`“”]/g)]
+        .map((m) => m[1].trim())
+        .filter(Boolean);
+    const files = [...text.matchAll(/[A-Za-z0-9._/-]+\.[A-Za-z0-9]+/g)].map((m) => m[0]);
+    const colors = (text.match(/#[0-9a-fA-F]{3,8}\b|rgb[a]?\([^)]+\)/gi) || []);
+    const idents = text
+        .split(/[^A-Za-z0-9_-]+/)
+        .map((w) => w.trim())
+        .filter((w) => w.length >= 4 && !STOP.has(w.toLowerCase()) && !/^\d+$/.test(w));
+    return {
+        quoted: unique(quoted).slice(0, 8),
+        files: unique(files).slice(0, 8),
+        colors: unique(colors).slice(0, 6),
+        idents: unique(idents).slice(0, 10),
+        wantsCss: /css|stylesheet|<style|giao diện|màu|hover|padding|margin|background|font-size|kiểu/i.test(text),
+    };
+}
+
+function hasCss(relPath, content) {
+    if (/\.(css|scss|sass|less)$/i.test(relPath)) return /[{:]/.test(content);
+    return /<style[\s>]/i.test(content) || /[.#][\w-]+\s*\{[^}]+:[^}]+;/.test(content);
+}
+
+function syntaxIssue(relPath, content) {
+    const text = String(content || '');
+    if (/\.json$/i.test(relPath)) {
+        try {
+            JSON.parse(text);
+        } catch (error) {
+            return error.message;
+        }
+        return '';
+    }
+    if (/\.(js|mjs|cjs)$/i.test(relPath)) {
+        try {
+            new vm.Script(text, { filename: relPath });
+        } catch (error) {
+            return error.message.split('\n')[0];
+        }
+    }
+    if (/\.css$/i.test(relPath)) {
+        const curly = (text.match(/\{/g) || []).length - (text.match(/\}/g) || []).length;
+        if (curly) return curly > 0 ? `lệch ngoặc: thiếu ${curly} }` : `lệch ngoặc: thừa ${-curly} }`;
+    }
+    if (/\\n|\\t|\\"/.test(text) && /\.(css|scss|vue|html)$/i.test(relPath)) {
+        return 'còn ký tự escape JSON (\\n \\t \\") trong file';
+    }
+    return '';
+}
+
+function isUsefulNeedle(text) {
+    const line = String(text || '').trim();
+    if (line.length < 16) return false;
+    if (/^<\/?[a-zA-Z0-9-]+\/?>$/.test(line)) return false;
+    if (/^[{}();,\[\]\s]+$/.test(line)) return false;
+    return /[A-Za-zÀ-ỹ0-9]{4,}/.test(line);
+}
+
+function needleFromOld(old) {
+    const lines = String(old || '').split('\n').map((line) => line.trim()).filter(isUsefulNeedle);
+    if (lines.length) return lines.sort((a, b) => b.length - a.length)[0].slice(0, 80);
+    const raw = String(old || '').trim();
+    return isUsefulNeedle(raw) ? raw.slice(0, 80) : '';
+}
+
+function collectNeedles(action) {
+    const out = [];
+    if (action?.old) {
+        const needle = needleFromOld(action.old);
+        if (needle) out.push(needle);
+    }
+    for (const patch of action?.patches || []) {
+        const needle = needleFromOld(patch.old);
+        if (needle) out.push(needle);
+    }
+    return unique(out);
+}
+
+function collectPatches(action) {
+    if (Array.isArray(action?.patches) && action.patches.length) {
+        return action.patches
+            .map((item) => ({ old: String(item.old ?? ''), new: String(item.new ?? '') }))
+            .filter((item) => item.old || item.new);
+    }
+    if (action?.old != null || action?.new != null) {
+        return [{ old: String(action.old ?? ''), new: String(action.new ?? '') }];
+    }
+    return [];
+}
+
+async function auditAction(workspace, root, action, result) {
+    const rel = action.path;
+    if (!result?.ok) return { ok: false, error: result?.error || `${action.type} failed` };
+    if (!rel) return { ok: true, note: '' };
+
+    if (action.type === 'create_file') {
+        try {
+            const { content } = await workspace.readFile(root, rel);
+            const snippet = String(action.content || '').replace(/\s+/g, ' ').trim().slice(0, 48);
+            const hay = String(content || '').replace(/\s+/g, ' ');
+            if (snippet && snippet.length >= 12 && !hay.includes(snippet.slice(0, 32))) {
+                return { ok: false, error: `AUDIT FAIL: create ${rel} nhưng nội dung trên disk không khớp.` };
+            }
+            if (!String(content || '').length && String(action.content || '').trim()) {
+                return { ok: false, error: `AUDIT FAIL: create ${rel} nhưng file trên disk trống.` };
+            }
+            return { ok: true, note: `AUDIT PASS: ${rel} đã tạo (${String(content).length} chars)` };
+        } catch {
+            return { ok: false, error: `AUDIT FAIL: create ${rel} nhưng file không có trên disk.` };
+        }
+    }
+
+    if (action.type === 'edit_file') {
+        try {
+            const { content } = await workspace.readFile(root, rel);
+            const text = String(content || '');
+            for (const patch of collectPatches(action)) {
+                if (patch.new && !text.includes(patch.new)) {
+                    return { ok: false, error: `AUDIT FAIL: sửa ${rel} nhưng disk không có đoạn new.` };
+                }
+                if (patch.old && patch.new && !patch.new.includes(patch.old) && text.includes(patch.old)
+                    && !action.replace_all) {
+                    return {
+                        ok: false,
+                        error: `AUDIT FAIL: sửa ${rel} nhưng đoạn old vẫn còn trên disk.`,
+                    };
+                }
+            }
+            return { ok: true, note: `AUDIT PASS: ${rel} đã chứa thay đổi` };
+        } catch (error) {
+            return { ok: false, error: `AUDIT FAIL: không đọc lại được ${rel}: ${error.message}` };
+        }
+    }
+
+    if (action.type === 'mkdir') {
+        try {
+            const abs = workspace.resolveSafe(root, rel);
+            if (!fs.existsSync(abs) || !fs.statSync(abs).isDirectory()) {
+                return { ok: false, error: `AUDIT FAIL: mkdir ${rel} nhưng thư mục không có.` };
+            }
+            return { ok: true, note: `AUDIT PASS: thư mục ${rel} đã có` };
+        } catch (error) {
+            return { ok: false, error: `AUDIT FAIL: mkdir ${rel}: ${error.message}` };
+        }
+    }
+
+    if (action.type === 'delete_file') {
+        try {
+            const abs = workspace.resolveSafe(root, rel);
+            if (fs.existsSync(abs)) {
+                return { ok: false, error: `AUDIT FAIL: xóa ${rel} nhưng path vẫn còn.` };
+            }
+            return { ok: true, note: `AUDIT PASS: ${rel} đã xóa` };
+        } catch {
+            return { ok: true, note: `AUDIT PASS: ${rel} đã xóa` };
+        }
+    }
+
+    return { ok: true, note: '' };
+}
+
+async function sweepLeftovers(workspace, root, needles) {
+    const leftover = [];
+    for (const needle of unique(needles || []).slice(0, 8)) {
+        if (!isUsefulNeedle(needle)) continue;
+        const hits = await workspace.searchCode(root, needle, '');
+        for (const hit of hits.slice(0, 8)) {
+            leftover.push(`${hit.path}:${hit.line}: ${String(hit.text || '').slice(0, 120)}`);
+        }
+    }
+    return leftover;
+}
+
+function formatSweep(leftover) {
+    if (!leftover.length) {
+        return 'SWEEP PASS: không còn đoạn old ở file khác trong project.';
+    }
+    return `SWEEP FAIL: đoạn cũ vẫn còn — phải sửa nốt các chỗ này:\n${leftover.slice(0, 16).join('\n')}`;
+}
+
+function formatReport(report) {
+    if (report.ok) {
+        return `DISK CHECK: PASS\nĐã thấy thay đổi khớp task trong: ${report.checked.join(', ') || '(none)'}\nChỉ done=true khi không còn thiếu so với yêu cầu.`;
+    }
+    const lines = ['DISK CHECK: FAIL — chưa được phép done.', ...(report.missing || []), ...(report.syntax || [])];
+    return `${lines.join('\n')}\nĐọc lại slice rồi edit_file old/new cho đúng. Không khẳng định đã thêm nếu disk không có.`;
+}
+
+async function verifyChanges(workspace, root, task, filesChanged) {
+    const hints = extractHints(task);
+    const bodies = [];
+    for (const rel of filesChanged || []) {
+        try {
+            const { content } = await workspace.readFile(root, rel);
+            bodies.push({ path: rel, content: String(content || '') });
+        } catch {
+            // dir / unreadable — skip
+        }
+    }
+    const all = bodies.map((item) => item.content).join('\n');
+    const missing = [];
+    const syntax = [];
+
+    if (!bodies.length && (hints.wantsCss || hints.quoted.length || hints.colors.length)) {
+        missing.push('Chưa có file nào được ghi trên disk.');
+    }
+
+    for (const item of bodies) {
+        if (item.error) missing.push(`Không đọc được ${item.path}: ${item.error}`);
+        const issue = syntaxIssue(item.path, item.content);
+        if (issue) syntax.push(`${item.path}: ${issue}`);
+    }
+
+    for (const phrase of hints.quoted) {
+        if (!all.includes(phrase)) missing.push(`Không thấy đoạn được yêu cầu: "${phrase}"`);
+    }
+    for (const color of hints.colors) {
+        if (!all.toLowerCase().includes(color.toLowerCase())) {
+            missing.push(`Không thấy màu/token: ${color}`);
+        }
+    }
+    if (hints.wantsCss && !bodies.some((item) => hasCss(item.path, item.content))) {
+        missing.push('Task yêu cầu CSS/style nhưng file đã sửa không có rule CSS hoặc thẻ <style>.');
+    }
+    const idHits = hints.idents.filter((id) => all.toLowerCase().includes(id.toLowerCase()));
+    if (hints.idents.length >= 2 && idHits.length === 0) {
+        missing.push(`Không thấy từ khóa của task trong file đã sửa: ${hints.idents.slice(0, 6).join(', ')}`);
+    }
+    for (const file of hints.files) {
+        const hit = bodies.some((item) => item.path === file || item.path.endsWith(`/${file}`) || item.path.endsWith(file));
+        if (!hit && filesChanged?.length) {
+            const mentioned = all.includes(file);
+            if (!mentioned && /thêm|sửa|css|trong/i.test(task) && /\.(css|scss|vue|js)$/i.test(file)) {
+                missing.push(`Task nói tới ${file} nhưng không thấy file đó được sửa.`);
+            }
+        }
+    }
+
+    return {
+        ok: missing.length === 0 && syntax.length === 0,
+        missing,
+        syntax,
+        checked: bodies.map((item) => item.path),
+        hints,
+    };
+}
+
+module.exports = {
+    verifyChanges,
+    formatReport,
+    extractHints,
+    syntaxIssue,
+    auditAction,
+    collectNeedles,
+    sweepLeftovers,
+    formatSweep,
+    isUsefulNeedle,
+};
