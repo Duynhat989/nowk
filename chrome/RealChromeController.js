@@ -6,6 +6,7 @@ const { exec } = require('child_process');
 const util = require('util');
 const FingerprintInjector = require('./FingerprintInjector');
 const { parseProxy, buildProxyServerUrl } = require('../utils/parseProxy');
+const { isWin, isLinux, killProcessTree } = require('../utils/runtimePlatform');
 
 const execAsync = util.promisify(exec);
 
@@ -92,7 +93,12 @@ class RealChromeController {
             `--user-data-dir=${this.profilePath}`,
             '--no-first-run',
             '--no-default-browser-check',
+            '--disable-session-crashed-bubble',
+            '--hide-crash-restore-bubble',
         ];
+        if (isLinux) {
+            args.push('--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu-sandbox');
+        }
 
         const fp = this.profile.fingerprint || {};
         if (fp.language) {
@@ -120,8 +126,9 @@ class RealChromeController {
 
     spawnChrome(args) {
         this.chromeProcess = spawn(this.chromePath, args, {
-            detached: false,
+            detached: !isWin,
             stdio: ['ignore', 'pipe', 'pipe'],
+            windowsHide: false,
         });
 
         this.chromePid = this.chromeProcess.pid;
@@ -239,9 +246,9 @@ class RealChromeController {
 
     async processExists(pid) {
         try {
-            if (process.platform === 'win32') {
-                const { stdout } = await execAsync(`tasklist /FI "PID eq ${pid}" /NH`);
-                return stdout.includes(pid.toString());
+            if (isWin) {
+                const { stdout } = await execAsync(`tasklist /FI "PID eq ${pid}" /NH`, { windowsHide: true });
+                return stdout.includes(String(pid));
             }
             process.kill(pid, 0);
             return true;
@@ -254,22 +261,7 @@ class RealChromeController {
         if (!this.chromePid) return;
         const exists = await this.processExists(this.chromePid);
         if (!exists) return;
-
-        try {
-            if (process.platform === 'win32') {
-                await execAsync(`taskkill /pid ${this.chromePid} /f /t`);
-            } else {
-                try {
-                    process.kill(-this.chromePid, 'SIGKILL');
-                } catch {
-                    process.kill(this.chromePid, 'SIGKILL');
-                }
-            }
-        } catch (err) {
-            if (!err.message?.includes('not found')) {
-                console.error('Lỗi kill Chrome:', err.message);
-            }
-        }
+        killProcessTree(this.chromePid, 'SIGKILL');
     }
 
     async close() {

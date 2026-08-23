@@ -1,5 +1,7 @@
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
+const { isMac, isWin, firstExisting, which } = require('./runtimePlatform');
 
 const CHANNELS = [
     { id: 'stable', label: 'Chrome Stable' },
@@ -14,36 +16,93 @@ class ChromeResolver {
     }
 
     getPaths(channel = 'stable') {
-        if (process.platform === 'darwin') {
+        if (isMac) {
+            const homeApps = path.join(os.homedir(), 'Applications');
             const map = {
-                stable: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-                beta: '/Applications/Google Chrome Beta.app/Contents/MacOS/Google Chrome Beta',
-                dev: '/Applications/Google Chrome Dev.app/Contents/MacOS/Google Chrome Dev',
-                canary: '/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary',
+                stable: [
+                    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+                    path.join(homeApps, 'Google Chrome.app/Contents/MacOS/Google Chrome'),
+                ],
+                beta: [
+                    '/Applications/Google Chrome Beta.app/Contents/MacOS/Google Chrome Beta',
+                    path.join(homeApps, 'Google Chrome Beta.app/Contents/MacOS/Google Chrome Beta'),
+                ],
+                dev: [
+                    '/Applications/Google Chrome Dev.app/Contents/MacOS/Google Chrome Dev',
+                    path.join(homeApps, 'Google Chrome Dev.app/Contents/MacOS/Google Chrome Dev'),
+                ],
+                canary: [
+                    '/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary',
+                    path.join(homeApps, 'Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary'),
+                ],
             };
-            return [map[channel] || map.stable];
+            return map[channel] || map.stable;
         }
 
-        if (process.platform === 'win32') {
+        if (isWin) {
             const local = process.env.LOCALAPPDATA || '';
+            const pf = process.env.PROGRAMFILES || 'C:\\Program Files';
+            const pf86 = process.env['PROGRAMFILES(X86)'] || 'C:\\Program Files (x86)';
             const map = {
-                stable: path.join(local, 'Google', 'Chrome', 'Application', 'chrome.exe'),
-                beta: path.join(local, 'Google', 'Chrome Beta', 'Application', 'chrome.exe'),
-                dev: path.join(local, 'Google', 'Chrome Dev', 'Application', 'chrome.exe'),
-                canary: path.join(local, 'Google', 'Chrome SxS', 'Application', 'chrome.exe'),
+                stable: [
+                    path.join(local, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+                    path.join(pf, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+                    path.join(pf86, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+                ],
+                beta: [
+                    path.join(local, 'Google', 'Chrome Beta', 'Application', 'chrome.exe'),
+                    path.join(pf, 'Google', 'Chrome Beta', 'Application', 'chrome.exe'),
+                ],
+                dev: [
+                    path.join(local, 'Google', 'Chrome Dev', 'Application', 'chrome.exe'),
+                    path.join(pf, 'Google', 'Chrome Dev', 'Application', 'chrome.exe'),
+                ],
+                canary: [
+                    path.join(local, 'Google', 'Chrome SxS', 'Application', 'chrome.exe'),
+                    path.join(pf, 'Google', 'Chrome SxS', 'Application', 'chrome.exe'),
+                ],
             };
-            return [
-                map[channel] || map.stable,
-                'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-                'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
-            ];
+            return map[channel] || map.stable;
         }
 
-        return [
-            '/usr/bin/google-chrome-stable',
-            '/usr/bin/google-chrome',
-            '/usr/bin/chromium-browser',
-        ];
+        const linux = {
+            stable: [
+                '/usr/bin/google-chrome-stable',
+                '/usr/bin/google-chrome',
+                '/opt/google/chrome/chrome',
+                '/opt/google/chrome/google-chrome',
+                '/snap/bin/chromium',
+                '/usr/bin/chromium-browser',
+                '/usr/bin/chromium',
+                '/var/lib/flatpak/exports/bin/com.google.Chrome',
+            ],
+            beta: [
+                '/usr/bin/google-chrome-beta',
+                '/opt/google/chrome-beta/chrome',
+                '/opt/google/chrome-beta/google-chrome-beta',
+            ],
+            dev: [
+                '/usr/bin/google-chrome-unstable',
+                '/opt/google/chrome-unstable/chrome',
+            ],
+            canary: [
+                '/usr/bin/google-chrome-canary',
+                '/opt/google/chrome-canary/chrome',
+            ],
+        };
+        return linux[channel] || linux.stable;
+    }
+
+    pathCommands(channel = 'stable') {
+        if (isWin) return ['chrome'];
+        if (isMac) return [];
+        const map = {
+            stable: ['google-chrome-stable', 'google-chrome', 'chromium-browser', 'chromium'],
+            beta: ['google-chrome-beta'],
+            dev: ['google-chrome-unstable'],
+            canary: ['google-chrome-canary'],
+        };
+        return map[channel] || map.stable;
     }
 
     resolve(channel = 'stable', customPath = '') {
@@ -51,9 +110,14 @@ class ChromeResolver {
             return { path: customPath, channel, source: 'custom' };
         }
 
-        const found = this.getPaths(channel).find(p => p && fs.existsSync(p));
+        const found = firstExisting(this.getPaths(channel));
         if (found) {
             return { path: found, channel, source: 'system' };
+        }
+
+        for (const cmd of this.pathCommands(channel)) {
+            const fromPath = which(cmd);
+            if (fromPath) return { path: fromPath, channel, source: 'path' };
         }
 
         throw new Error(

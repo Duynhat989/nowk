@@ -1,5 +1,12 @@
 const { spawn } = require('child_process');
 const path = require('path');
+const {
+    isWin,
+    defaultShell,
+    interactiveShellArgs,
+    shellRunArgs,
+    killProcessTree,
+} = require('./runtimePlatform');
 
 const DANGEROUS = /\brm\s+(-[a-zA-Z]*rf|--no-preserve-root)|mkfs\b|dd\s+if=|shutdown\b|reboot\b/i;
 const MAX_AGENT = 8000;
@@ -30,18 +37,18 @@ function shellEnv(cols, rows) {
 
 function spawnInteractive(cwd, cols, rows) {
     const env = shellEnv(cols, rows);
-    const isWin = process.platform === 'win32';
-    const shell = isWin ? (process.env.ComSpec || 'cmd.exe') : (process.env.SHELL || '/bin/zsh');
+    const shell = defaultShell();
     try {
         const pty = require('node-pty');
         return {
             kind: 'pty',
-            proc: pty.spawn(shell, isWin ? [] : ['-il'], {
+            proc: pty.spawn(shell, interactiveShellArgs(), {
                 name: 'xterm-256color',
                 cols: cols || 80,
                 rows: rows || 24,
                 cwd,
                 env,
+                useConpty: isWin,
             }),
         };
     } catch {
@@ -58,8 +65,8 @@ function spawnInteractive(cwd, cols, rows) {
 }
 
 function shellTitle() {
-    const name = path.basename(process.env.SHELL || (process.platform === 'win32' ? 'cmd.exe' : '/bin/zsh'));
-    return name.replace(/\.exe$/i, '') || 'bash';
+    const name = path.basename(defaultShell());
+    return name.replace(/\.exe$/i, '') || (isWin ? 'cmd' : 'bash');
 }
 
 function jobTitle(command) {
@@ -134,7 +141,14 @@ class TerminalService {
 
     stopChild(child, signal = 'SIGTERM') {
         if (!child) return;
+        const pid = child.pid;
+        if (isWin && pid) {
+            killProcessTree(pid, signal);
+            try { child.kill(); } catch { /* ignore */ }
+            return;
+        }
         try { child.kill(signal); } catch { /* ignore */ }
+        if (pid) killProcessTree(pid, signal);
     }
 
     kill(target = 'all', id) {
@@ -345,7 +359,7 @@ class TerminalService {
     write(data, id) {
         const text = String(data ?? '');
         if (!text) return { ok: true };
-        const payload = process.platform === 'win32' && text === '\r' ? '\r\n' : text;
+        const payload = isWin && text === '\r' ? '\r\n' : text;
         const sid = id || this.activeId;
         if (sid) this.activeId = sid;
         try {
@@ -414,10 +428,7 @@ class TerminalService {
     }
 
     spawnShell(cwd, cmd) {
-        const isWin = process.platform === 'win32';
-        const shell = isWin ? (process.env.ComSpec || 'cmd.exe') : (process.env.SHELL || '/bin/zsh');
-        const args = isWin ? ['/d', '/s', '/c', cmd] : ['-lc', cmd];
-        return spawn(shell, args, {
+        return spawn(defaultShell(), shellRunArgs(cmd), {
             cwd,
             env: shellEnv(80, 24),
             windowsHide: true,

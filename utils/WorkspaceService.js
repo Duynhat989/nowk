@@ -190,6 +190,7 @@ class WorkspaceService {
                 cwd: root,
                 timeout: 8000,
                 maxBuffer: 1024 * 1024,
+                windowsHide: true,
             }, (err, stdout) => {
                 resolve(err ? '' : String(stdout || ''));
             });
@@ -202,6 +203,7 @@ class WorkspaceService {
                 cwd: root,
                 timeout: 8000,
                 maxBuffer: 256 * 1024,
+                windowsHide: true,
             }, (err, stdout) => {
                 resolve(err ? '' : String(stdout || ''));
             });
@@ -214,6 +216,7 @@ class WorkspaceService {
                 cwd: root,
                 timeout: 8000,
                 maxBuffer: 2 * 1024 * 1024,
+                windowsHide: true,
             }, (err, stdout) => {
                 if (err) {
                     resolve({});

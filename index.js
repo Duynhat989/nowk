@@ -12,6 +12,7 @@ const TerminalService = require('./utils/TerminalService');
 const FingerprintGenerator = require('./chrome/FingerprintRandomizer');
 const { toPlain } = require('./utils/ipcPlain');
 const { parseProxy } = require('./utils/parseProxy');
+const { isWin, isMac, isLinux, resolvePickedChrome } = require('./utils/runtimePlatform');
 
 const isDev = process.argv.includes('--dev');
 const runningBrowsers = new Map();
@@ -110,7 +111,7 @@ function toggleDevTools() {
 
 function registerDevToolsShortcuts() {
     const toggle = () => toggleDevTools();
-    for (const accelerator of ['F12', process.platform === 'darwin' ? 'Command+Alt+I' : 'Control+Shift+I']) {
+    for (const accelerator of ['F12', isMac ? 'Command+Alt+I' : 'Control+Shift+I']) {
         try {
             if (!globalShortcut.register(accelerator, toggle)) {
                 console.warn('[DevTools] shortcut not registered:', accelerator);
@@ -125,11 +126,11 @@ function registerDevToolsInput(mainWindowRef) {
     mainWindowRef.webContents.on('before-input-event', (event, input) => {
         if (input.type !== 'keyDown') return;
         const isF12 = input.key === 'F12';
-        const isMac = process.platform === 'darwin'
+        const isMacShortcut = isMac
             && input.meta && input.alt && input.key.toLowerCase() === 'i';
-        const isWin = process.platform !== 'darwin'
+        const isWinLinuxShortcut = !isMac
             && input.control && input.shift && input.key.toLowerCase() === 'i';
-        if (!isF12 && !isMac && !isWin) return;
+        if (!isF12 && !isMacShortcut && !isWinLinuxShortcut) return;
         if (!mainWindowRef || mainWindowRef.isDestroyed()) return;
         mainWindowRef.webContents.toggleDevTools();
         event.preventDefault();
@@ -171,7 +172,7 @@ function requireWorkspaceRoot(root) {
 
 function ensureAppServices() {
     if (settingsStore) return;
-    projectPath = isDev ? app.getAppPath() : path.dirname(app.getPath('exe'));
+    projectPath = isDev ? app.getAppPath() : app.getPath('userData');
     repairChromiumCache(app.getPath('userData'));
 
     const configDir = path.join(projectPath, 'config');
@@ -247,7 +248,8 @@ function createWindow() {
         minHeight: 600,
         backgroundColor: '#111113',
         title: 'NowK',
-        titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
+        titleBarStyle: isMac ? 'hiddenInset' : 'default',
+        autoHideMenuBar: false,
         webPreferences: {
             preload: path.join(__dirname, 'preload.js'),
             contextIsolation: true,
@@ -269,7 +271,6 @@ function createWindow() {
 }
 
 function buildAppMenu() {
-    const isMac = process.platform === 'darwin';
     const template = [
         ...(isMac ? [{
             label: app.name,
@@ -313,15 +314,48 @@ function buildAppMenu() {
 }
 
 app.setName('NowK');
+if (isWin) app.setAppUserModelId('com.nowk.app');
+try {
+    app.setPath('userData', path.join(app.getPath('appData'), 'NowK'));
+} catch {
+    // keep Electron default
+}
 
-app.whenReady().then(() => {
-    buildAppMenu();
-    createWindow();
-    registerDevToolsShortcuts();
-    app.on('activate', () => {
-        if (BrowserWindow.getAllWindows().length === 0) createWindow();
+if (isLinux) {
+    app.commandLine.appendSwitch('no-sandbox');
+    app.commandLine.appendSwitch('disable-gpu-sandbox');
+    if (!process.env.ELECTRON_OZONE_PLATFORM_HINT) {
+        app.commandLine.appendSwitch('ozone-platform-hint', 'auto');
+    }
+    if (process.env.NOWK_DISABLE_GPU === '1') {
+        app.disableHardwareAcceleration();
+    }
+}
+
+const gotLock = app.requestSingleInstanceLock();
+if (!gotLock) {
+    app.quit();
+} else {
+    app.on('second-instance', () => {
+        const win = focusedSession()?.window || BrowserWindow.getAllWindows()[0];
+        if (win && !win.isDestroyed()) {
+            if (win.isMinimized()) win.restore();
+            win.show();
+            win.focus();
+            return;
+        }
+        if (app.isReady()) createWindow();
     });
-});
+
+    app.whenReady().then(() => {
+        buildAppMenu();
+        createWindow();
+        registerDevToolsShortcuts();
+        app.on('activate', () => {
+            if (BrowserWindow.getAllWindows().length === 0) createWindow();
+        });
+    });
+}
 
 app.on('will-quit', () => {
     globalShortcut.unregisterAll();
@@ -333,12 +367,17 @@ app.on('will-quit', () => {
 });
 
 app.on('window-all-closed', () => {
-    if (process.platform !== 'darwin') app.quit();
+    if (!isMac) app.quit();
 });
 
-app.on('before-quit', async () => {
-    const closers = [...runningBrowsers.values()].map(e => e.controller.close().catch(() => {}));
-    await Promise.allSettled(closers);
+let quitting = false;
+app.on('before-quit', (event) => {
+    if (quitting || runningBrowsers.size === 0) return;
+    event.preventDefault();
+    quitting = true;
+    Promise.allSettled([...runningBrowsers.values()].map((entry) => (
+        entry.controller.close().catch(() => {})
+    ))).finally(() => app.quit());
 });
 
 function normalizeProfileProxy(proxy) {
@@ -679,12 +718,12 @@ ipcMain.handle('settings:pick-chrome-path', async (event) => {
     const result = await dialog.showOpenDialog(win, {
         properties: ['openFile'],
         title: 'Chọn file Chrome',
-        filters: process.platform === 'win32'
+        filters: isWin
             ? [{ name: 'Chrome', extensions: ['exe'] }]
             : [{ name: 'Chrome', extensions: ['*'] }],
     });
     if (result.canceled || !result.filePaths.length) return null;
-    return result.filePaths[0];
+    return resolvePickedChrome(result.filePaths[0]);
 });
 
 ipcMain.handle('settings:pick-data-path', async (event) => {

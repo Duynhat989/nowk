@@ -6,6 +6,7 @@ const { toDiffLines, fileAddedLines } = require('./diffHunk');
 const { formatRead } = require('./ProjectContext');
 const { materializeAction } = require('./fileText');
 const { resolveWritePath, retargetPackageEntry, alignPackageJsonText } = require('./moduleCompat');
+const { pythonCommand, quoteForShell } = require('../runtimePlatform');
 
 const DANGEROUS = /\brm\s+(-[a-zA-Z]*rf|--no-preserve-root)|mkfs\b|dd\s+if=|shutdown\b|reboot\b/i;
 const SHELL_WRITE = /\btee\b|\b(cat|printf|echo)\b[\s\S]{0,500}(>|>>)\s*[\w./'"-]+|\b(writeFileSync|fs\.writeFile)\b/i;
@@ -362,10 +363,7 @@ class ToolManager {
     }
 
     pythonBin() {
-        const win = process.platform === 'win32';
-        const venv = path.join(this.root, '.venv', win ? 'Scripts' : 'bin', win ? 'python.exe' : 'python');
-        if (fs.existsSync(venv)) return `"${venv}"`;
-        return 'python3';
+        return pythonCommand(this.root);
     }
 
     readScripts() {
@@ -378,9 +376,7 @@ class ToolManager {
     }
 
     quote(relPath) {
-        const text = String(relPath || '').replace(/\\/g, '/');
-        if (!/[^\w./@%+=:,-]/i.test(text)) return text;
-        return `'${text.replace(/'/g, `'\\''`)}'`;
+        return quoteForShell(relPath);
     }
 
     suggestStartCommand() {

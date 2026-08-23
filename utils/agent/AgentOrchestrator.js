@@ -308,6 +308,20 @@ class AgentOrchestrator {
         this.onProgress?.({ type, message, ...extra });
     }
 
+    pump() {
+        return new Promise((resolve) => setImmediate(resolve));
+    }
+
+    emitWorking(action, message = '') {
+        this.emit('working', message, {
+            tool: action?.type || action?.tool || 'think',
+            path: action?.path || '',
+            command: action?.command || '',
+            query: action?.query || '',
+        });
+        return this.pump();
+    }
+
     emitPlan(state) {
         if (!state.plan?.length) return;
         this.emit('plan', '', {
@@ -352,6 +366,7 @@ class AgentOrchestrator {
     }
 
     async bootstrapSurvey(tools, state, task, relevant, uiSurfaces) {
+        await this.emitWorking({ type: 'list_files' }, 'Đang đọc dự án để nắm hiện trạng...');
         this.emit('status', 'Đang đọc dự án để nắm hiện trạng...');
         state.markPhase('survey');
         const first = [
@@ -363,6 +378,7 @@ class AgentOrchestrator {
         this.appendSurvey(state, listed.results);
         const more = buildSurveyReads(parseListedPaths(listed.results), task, relevant, uiSurfaces);
         if (more.length) {
+            await this.emitWorking({ type: 'read_file' }, `Đang đọc ${more.length} file then chốt...`);
             this.emit('status', `Đang đọc ${more.length} file then chốt...`);
             const extra = await this.executeActions(tools, more, state, { quiet: true });
             this.appendSurvey(state, extra.results);
@@ -711,14 +727,16 @@ ${TURN}`;
         const readPaths = [];
         for (const action of actions) {
             this.throwIfAborted();
-            if (!quiet) {
-                this.emit('tool', action.path || action.command || action.query || action.type, {
-                    tool: action.type,
-                    path: action.path || '',
-                    command: action.command || '',
-                    query: action.query || '',
-                });
-            }
+            await this.emitWorking(action);
+            this.emit('tool', action.path || action.command || action.query || action.type, {
+                tool: action.type,
+                path: action.path || '',
+                command: action.command || '',
+                query: action.query || '',
+                start: action.start || action.from || '',
+                end: action.end || action.to || '',
+            });
+            await this.pump();
             let result = await tools.run(action);
             if (result.ok && /create_file|edit_file|mkdir|delete_file/.test(action.type)) {
                 const audit = await auditAction(this.workspace, tools.root, action, result);
@@ -871,6 +889,7 @@ ${TURN}`;
         };
 
         try {
+        await this.emitWorking({ type: 'think' }, 'Đang đọc dự án...');
         this.emit('status', 'Đang đọc dự án...');
         state.markPhase('scan');
         const scan = await this.context.scan(root);
@@ -884,12 +903,14 @@ ${TURN}`;
         if (reuseSurvey) {
             state.surveyDigest = memory.surveyDigest;
             state.projectBrief = memory.projectBrief || memory.surveyDigest;
+            await this.emitWorking({ type: 'think' }, 'Đang làm việc…');
             this.emit('status', 'Đang làm việc…');
         } else {
             await this.bootstrapSurvey(tools, state, task, state.relevantFiles, uiSurfaces);
         }
 
         state.markPhase('execute');
+        await this.emitWorking({ type: 'think' }, `${this.llmName} đang chạy…`);
         this.emit('status', `${this.llmName} đang chạy…`);
         let raw = await send(firstPrompt());
         let parsed = this.ingest(state, raw);
@@ -956,7 +977,7 @@ Do not emit read_file for files you already received. Actions must have {"type":
             else if (parsed.actions.every((item) => READ_TOOLS.has(item.type))) readStreak += 1;
             const quiet = parsed.actions.every((item) => READ_TOOLS.has(item.type));
             this.emit('status', quiet ? 'Đang đọc…' : `Đang sửa (${parsed.actions.filter((item) => WRITE_TOOLS.has(item.type)).length})…`);
-            const { results, applied } = await this.executeActions(tools, parsed.actions, state, { quiet });
+            const { results, applied } = await this.executeActions(tools, parsed.actions, state);
             appliedAll.push(...applied);
             if (i === MAX_ITERS) break;
             raw = await send(resultPrompt(results));

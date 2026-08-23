@@ -34,90 +34,140 @@
       </button>
     </div>
 
-    <div v-if="plan.length || checks.length" class="agent-board">
-      <section v-if="plan.length" class="agent-board-block" :class="{ open: planOpen }">
-        <button type="button" class="agent-board-toggle" @click="planOpen = !planOpen">
-          <strong>{{ t('chat.planTitle') }}</strong>
-          <span>{{ planDone }}/{{ plan.length }}</span>
-          <span class="agent-board-chevron" :class="{ open: planOpen }">▸</span>
-        </button>
-        <ol v-if="planOpen">
-          <li v-for="(item, idx) in plan" :key="idx" :class="item.status">
-            <span class="agent-check-mark">{{ item.status === 'completed' ? '✓' : '○' }}</span>
-            {{ item.task }}
-          </li>
-        </ol>
-      </section>
-      <section v-if="checks.length" class="agent-board-block">
-        <header>
-          <strong>{{ t('chat.checksTitle') }}</strong>
-        </header>
-        <ul>
-          <li v-for="item in checks" :key="item.id" :class="item.ok ? 'ok' : 'bad'">
-            <span class="agent-check-mark">{{ item.ok ? '✓' : '!' }}</span>
-            <div>
-              <p>{{ item.text }}</p>
-              <small v-if="item.path">{{ item.path }}</small>
-              <small v-if="item.extra" class="agent-check-extra">{{ item.extra }}</small>
-            </div>
-          </li>
-        </ul>
-      </section>
+    <div v-if="plan.length" class="agent-plan">
+      <button type="button" class="agent-plan-toggle" @click="planOpen = !planOpen">
+        <span>{{ t('chat.planTitle') }}</span>
+        <span class="agent-plan-count">{{ planDone }}/{{ plan.length }}</span>
+        <span class="agent-plan-chevron" :class="{ open: planOpen }">▾</span>
+      </button>
+      <ol v-if="planOpen">
+        <li v-for="(item, idx) in plan" :key="idx" :class="item.status">
+          <span>{{ item.status === 'completed' ? '✓' : '○' }}</span>
+          {{ item.task }}
+        </li>
+      </ol>
     </div>
 
     <div ref="listEl" class="agent-messages">
-      <div v-if="!messages.length && !plan.length && !checks.length" class="agent-empty">
+      <div v-if="!timeline.length" class="agent-empty">
         <div class="agent-empty-mark">✦</div>
         <h3>{{ t('chat.emptyTitle') }}</h3>
         <p>{{ t('chat.emptySlogan') }}</p>
       </div>
+
       <div
-        v-for="item in messages"
-        :key="item.id"
-        class="agent-msg"
-        :class="item.role"
+        v-for="(block, idx) in timeline"
+        :key="block.id"
+        class="agent-block"
+        :class="block.role"
       >
-        <div v-if="item.role === 'tool'" class="agent-tool">
-          <span class="agent-tool-kind">{{ item.tool || 'tool' }}</span>
-          <span class="agent-tool-target">{{ item.path || item.command || item.query || item.text }}</span>
+        <div v-if="block.role === 'user'" class="agent-user">{{ block.text }}</div>
+
+        <div v-else-if="block.role === 'assistant'" class="agent-assistant">{{ block.text }}</div>
+
+        <div v-else-if="block.role === 'activity'" class="agent-activity">
+          <button type="button" class="agent-activity-head" @click="toggleActivity(block.id)">
+            <span class="agent-activity-title">{{ activityTitle(block, idx === timeline.length - 1) }}</span>
+            <span class="agent-activity-chevron" :class="{ open: isOpen(block.id) }">▾</span>
+          </button>
+          <div v-if="isOpen(block.id)" class="agent-activity-body">
+            <template v-for="item in block.items" :key="item.id">
+              <div v-if="item.kind === 'thought'" class="agent-thought" :class="{ live: item.live }">
+                {{ thoughtLabel(item) }}
+              </div>
+
+              <button
+                v-else-if="item.kind === 'explore'"
+                type="button"
+                class="agent-act"
+                @click="toggleRow(item.id)"
+              >
+                <span class="agent-act-verb">{{ item.tool }}</span>
+                <span class="agent-act-target">{{ exploreTarget(item) }}</span>
+                <span v-if="item.range" class="agent-act-range">{{ item.range }}</span>
+              </button>
+
+              <div v-else-if="item.kind === 'command'" class="agent-cmd">
+                <div class="agent-cmd-head">
+                  <span class="agent-cmd-icon">&gt;_</span>
+                  <span class="agent-cmd-title">{{ item.command || item.text }}</span>
+                  <span class="agent-cmd-meta">{{ commandMeta(item.command || item.text) }}</span>
+                </div>
+              </div>
+
+              <button
+                v-else-if="item.kind === 'write'"
+                type="button"
+                class="agent-filepill"
+                @click="toggleRow(item.id)"
+              >
+                <FileIcon :name="baseName(item.path)" type="file" />
+                <span class="agent-filepill-name">{{ baseName(item.path) || item.tool }}</span>
+                <span class="agent-filepill-verb">{{ item.tool }}</span>
+              </button>
+
+              <div v-else-if="item.kind === 'diff'" class="agent-diff">
+                <button type="button" class="agent-diff-head" @click="toggleRow(item.id)">
+                  <span class="agent-diff-chevron" :class="{ open: isRowOpen(item.id, item.lines?.length <= 24) }">▾</span>
+                  <FileIcon :name="baseName(item.path)" type="file" />
+                  <span class="agent-diff-name">{{ baseName(item.path) || item.path }}</span>
+                  <span v-if="diffStats(item.lines).add" class="agent-diff-add">+{{ diffStats(item.lines).add }}</span>
+                  <span v-if="diffStats(item.lines).del" class="agent-diff-del">-{{ diffStats(item.lines).del }}</span>
+                </button>
+                <pre v-if="isRowOpen(item.id, item.lines?.length <= 24)" class="agent-diff-body"><div
+                  v-for="(line, idx) in item.lines"
+                  :key="idx"
+                  class="agent-diff-line"
+                  :class="line.type"
+                ><span class="agent-diff-gutter">{{ lineNo(item.lines, idx) }}</span><span class="agent-diff-mark">{{ line.type === 'add' ? '+' : line.type === 'del' ? '-' : ' ' }}</span><span>{{ line.text }}</span></div></pre>
+              </div>
+
+              <div v-else-if="item.kind === 'check'" class="agent-check" :class="item.ok ? 'ok' : 'bad'">
+                <span>{{ item.ok ? '✓' : '!' }}</span>
+                <span>{{ item.text }}</span>
+                <small v-if="item.path">{{ baseName(item.path) }}</small>
+              </div>
+            </template>
+          </div>
         </div>
-        <div v-else-if="item.role === 'diff'" class="agent-diff">
-          <div class="agent-diff-path">{{ item.path }}</div>
-          <pre class="agent-diff-body"><div
-            v-for="(line, idx) in item.lines"
-            :key="idx"
-            class="agent-diff-line"
-            :class="line.type"
-          ><span class="agent-diff-mark">{{ line.type === 'add' ? '+' : line.type === 'del' ? '-' : ' ' }}</span><span>{{ line.text }}</span></div></pre>
-        </div>
-        <template v-else>
-          <div class="agent-avatar">{{ avatar(item.role) }}</div>
-          <div class="agent-bubble">{{ item.text }}</div>
-        </template>
       </div>
     </div>
 
+    <div v-if="currentRunning && workingLine" class="agent-now">
+      <span class="agent-now-dot" />
+      <span class="agent-now-text">{{ workingLine }}</span>
+    </div>
+
     <form class="agent-composer" @submit.prevent="send">
-      <textarea
-        v-model="draft"
-        rows="3"
-        :placeholder="t('chat.placeholder')"
-        :disabled="currentRunning"
-        @keydown.enter.exact.prevent="send"
-      />
-      <div class="agent-composer-bar">
-        <span class="agent-hint" :class="{ bad: !browser.ok }">{{ browserHint }}</span>
-        <button
-          v-if="currentRunning"
-          class="btn btn-stop btn-sm"
-          type="button"
-          @click="stop"
-        >
-          {{ t('chat.stop') }}
-        </button>
-        <button v-else class="btn btn-primary btn-sm" type="submit" :disabled="!draft.trim() || Boolean(runningId)">
-          {{ t('chat.send') }}
-        </button>
+      <div class="agent-composer-box">
+        <textarea
+          v-model="draft"
+          rows="3"
+          :placeholder="t('chat.placeholder')"
+          :disabled="currentRunning"
+          @keydown.enter.exact.prevent="send"
+        />
+        <div class="agent-composer-bar">
+          <span class="agent-hint" :class="{ bad: !browser.ok }">{{ browserHint }}</span>
+          <button
+            v-if="currentRunning"
+            class="agent-send agent-send-stop"
+            type="button"
+            :title="t('chat.stop')"
+            @click="stop"
+          >
+            <span class="agent-send-sq" />
+          </button>
+          <button
+            v-else
+            class="agent-send"
+            type="submit"
+            :disabled="!draft.trim() || Boolean(runningId)"
+            :title="t('chat.send')"
+          >
+            <svg viewBox="0 0 16 16"><path d="M3 8h10M9 4l4 4-4 4"/></svg>
+          </button>
+        </div>
       </div>
     </form>
   </aside>
@@ -126,6 +176,7 @@
 <script setup>
 import { computed, inject, nextTick, onMounted, onUnmounted, ref } from 'vue';
 import { useI18n } from 'vue-i18n';
+import FileIcon from './FileIcon.vue';
 
 const props = defineProps({
   projectRoot: { type: String, default: '' },
@@ -143,6 +194,7 @@ function createSession() {
     plan: [],
     planOpen: false,
     checks: [],
+    working: null,
   };
 }
 
@@ -151,6 +203,8 @@ const sessions = ref([createSession()]);
 const activeId = ref(sessions.value[0].id);
 const listEl = ref(null);
 const runningId = ref('');
+const expanded = ref(new Set());
+const rowState = ref(new Map());
 const busy = computed(() => Boolean(runningId.value));
 const currentRunning = computed(() => runningId.value === activeId.value);
 
@@ -171,6 +225,45 @@ let nextId = 1;
 let unsub = null;
 let statusTimer = null;
 
+const EXPLORE = new Set(['Read', 'Search', 'List', 'Git']);
+const COMMAND = new Set(['Run', 'Start', 'Test', 'Build']);
+const WRITE = new Set(['Edit', 'Write', 'Delete', 'Mkdir']);
+
+const timeline = computed(() => {
+  const out = [];
+  let group = null;
+  const flush = () => {
+    if (group) out.push(group);
+    group = null;
+  };
+  for (const item of messages.value) {
+    if (item.role === 'user' || item.role === 'assistant') {
+      flush();
+      out.push(item);
+      continue;
+    }
+    if (!group) {
+      group = { role: 'activity', id: `act-${item.id}`, items: [] };
+    }
+    group.items.push({ ...item, kind: activityKind(item) });
+  }
+  const sessionChecks = checks.value || [];
+  if (sessionChecks.length) {
+    if (!group) group = { role: 'activity', id: 'act-checks', items: [] };
+    for (const item of sessionChecks) {
+      group.items.push({
+        id: item.id,
+        kind: 'check',
+        ok: item.ok,
+        text: item.text,
+        path: item.path,
+      });
+    }
+  }
+  flush();
+  return out;
+});
+
 const browserHint = computed(() => {
   const name = browser.value.providerName
     || ({ chatgpt: 'ChatGPT', deepseek: 'DeepSeek', gemini: 'Gemini' }[browser.value.provider] || 'Gemini');
@@ -180,11 +273,134 @@ const browserHint = computed(() => {
   return browser.value.error || t('chat.chromeClosed');
 });
 
-function avatar(role) {
-  if (role === 'user') return 'You';
-  if (role === 'status') return '…';
-  if (role === 'step') return '…';
-  return 'AI';
+function activityKind(item) {
+  if (item.role === 'status' || item.role === 'step') return 'thought';
+  if (item.role === 'diff') return 'diff';
+  if (item.role === 'tool') {
+    if (COMMAND.has(item.tool)) return 'command';
+    if (WRITE.has(item.tool)) return 'write';
+    if (EXPLORE.has(item.tool)) return 'explore';
+    return 'explore';
+  }
+  return 'thought';
+}
+
+function isOpen(id) {
+  return expanded.value.has(id);
+}
+
+function toggleActivity(id) {
+  const next = new Set(expanded.value);
+  if (next.has(id)) next.delete(id);
+  else next.add(id);
+  expanded.value = next;
+}
+
+function isRowOpen(id, fallback = true) {
+  if (rowState.value.has(id)) return rowState.value.get(id);
+  return fallback;
+}
+
+function toggleRow(id) {
+  const next = new Map(rowState.value);
+  next.set(id, !isRowOpen(id, true));
+  rowState.value = next;
+}
+
+function baseName(path) {
+  const text = String(path || '').replace(/\\/g, '/');
+  return text.split('/').filter(Boolean).pop() || text;
+}
+
+function activityTitle(block, isLast = false) {
+  if (currentRunning.value && isLast) return t('chat.details');
+  const items = block.items || [];
+  const files = new Set();
+  let searches = 0;
+  let writes = 0;
+  let commands = 0;
+  for (const item of items) {
+    if (item.kind === 'explore' && item.tool === 'Search') searches += 1;
+    if (item.path) files.add(item.path);
+    if (item.kind === 'write' || item.kind === 'diff') writes += 1;
+    if (item.kind === 'command') commands += 1;
+  }
+  if (files.size === 1 && !searches && !writes && !commands) {
+    return t('chat.exploredOne', { name: baseName([...files][0]) });
+  }
+  if (files.size && searches) return t('chat.exploredSearch', { files: files.size, searches });
+  if (files.size && !writes && !commands) return t('chat.explored', { files: files.size });
+  if (writes && !commands && files.size) return t('chat.editedFiles', { n: files.size });
+  if (commands && !files.size) return t('chat.ranCommands', { n: commands });
+  if (files.size) return t('chat.explored', { files: files.size });
+  return t('chat.activity');
+}
+
+function exploreTarget(item) {
+  if (item.tool === 'Search') {
+    const query = String(item.query || item.text || '').trim();
+    const where = item.path ? ` in ${baseName(item.path)}` : '';
+    return query ? `${query}${where}` : (item.path || item.text);
+  }
+  return baseName(item.path || item.text) || item.text;
+}
+
+function commandMeta(command) {
+  const token = String(command || '').trim().split(/\s+/)[0] || '';
+  return token.replace(/^.*[/\\]/, '').slice(0, 16);
+}
+
+function formatWorking(data) {
+  if (!data) return '';
+  const name = baseName(data.path) || data.path || '';
+  const query = String(data.query || '').trim();
+  const command = String(data.command || '').replace(/\s+/g, ' ').trim().slice(0, 48);
+  switch (data.tool) {
+    case 'read_file': return t('chat.workingRead', { name: name || 'file' });
+    case 'edit_file': return t('chat.workingEdit', { name: name || 'file' });
+    case 'create_file': return t('chat.workingWrite', { name: name || 'file' });
+    case 'delete_file': return t('chat.workingDelete', { name: name || 'file' });
+    case 'mkdir': return t('chat.workingMkdir', { name: name || 'folder' });
+    case 'search_code': return t('chat.workingSearch', { query: query || name || 'code' });
+    case 'list_files': return t('chat.workingList', { name: name || '/' });
+    case 'git_status':
+    case 'git_diff':
+    case 'git_log':
+      return t('chat.workingGit');
+    case 'run_command':
+    case 'run_start':
+    case 'run_test':
+    case 'run_build':
+      return t('chat.workingRun', { command: command || name || 'command' });
+    default:
+      return data.message || t('chat.workingThink');
+  }
+}
+
+const workingLine = computed(() => formatWorking(current().working));
+
+function thoughtLabel(item) {
+  if (item.live) return item.text || t('chat.workingThink');
+  if (item.role === 'step' && item.text && !/đang nghĩ|thinking/i.test(item.text)) {
+    return item.text;
+  }
+  const sec = item.sec || 0;
+  if (sec >= 3) return t('chat.thoughtFor', { sec });
+  return t('chat.thoughtBrief');
+}
+
+function diffStats(lines) {
+  let add = 0;
+  let del = 0;
+  for (const line of lines || []) {
+    if (line.type === 'add') add += 1;
+    if (line.type === 'del') del += 1;
+  }
+  return { add, del };
+}
+
+function lineNo(_lines, idx) {
+  return idx + 1;
 }
 
 function toolLabel(type) {
@@ -269,13 +485,37 @@ async function scrollBottom() {
   if (listEl.value) listEl.value.scrollTop = listEl.value.scrollHeight;
 }
 
+function rangeLabel(start, end) {
+  const from = Number(start);
+  const to = Number(end);
+  if (from > 0 && to > 0) return `L${from}-${to}`;
+  if (from > 0) return `L${from}`;
+  return '';
+}
+
 function push(role, text, extra = {}, session = current()) {
-  session.messages.push({ id: nextId++, role, text, ...extra });
+  session.messages.push({ id: nextId++, role, text, at: Date.now(), ...extra });
   if (session.id === activeId.value) scrollBottom();
 }
 
 function onProgress(data) {
   const session = data?.sessionId ? targetSession(data.sessionId) : current();
+  if (data?.type === 'working') {
+    session.working = {
+      tool: data.tool || 'think',
+      path: data.path || '',
+      command: data.command || '',
+      query: data.query || '',
+      message: data.message || '',
+    };
+    const last = session.messages[session.messages.length - 1];
+    if (last?.role === 'status') {
+      last.text = formatWorking(session.working);
+      last.live = true;
+    }
+    if (session.id === activeId.value) scrollBottom();
+    return;
+  }
   if (data?.type === 'plan' && Array.isArray(data.plan)) {
     session.plan = data.plan;
     return;
@@ -311,12 +551,19 @@ function onProgress(data) {
   if (data?.type === 'tool') {
     const last = session.messages[session.messages.length - 1];
     const label = data.path || data.command || data.query || data.message || '';
-    if (last?.role === 'tool' && last.tool === data.tool && last.path === label) return;
+    if (last?.role === 'tool' && last.tool === toolLabel(data.tool) && last.path === (data.path || label)) return;
+    if (last?.role === 'status') {
+      const sec = Math.max(0, Math.round((Date.now() - (last.at || Date.now())) / 1000));
+      last.role = 'step';
+      last.sec = sec;
+      last.live = false;
+    }
     push('tool', label, {
       tool: toolLabel(data.tool),
       path: data.path || '',
       command: data.command || '',
       query: data.query || '',
+      range: rangeLabel(data.start, data.end),
     }, session);
     return;
   }
@@ -334,10 +581,18 @@ function onProgress(data) {
     return;
   }
   if (data?.type === 'status' && data.message) {
+    if (!session.working || session.working.tool === 'think') {
+      session.working = { tool: 'think', message: data.message };
+    }
     const list = session.messages;
     const last = list[list.length - 1];
-    if (last?.role === 'status') last.text = data.message;
-    else push('status', data.message, {}, session);
+    if (last?.role === 'status') {
+      last.text = data.message;
+      last.live = true;
+    } else {
+      push('status', data.message, { live: true }, session);
+    }
+    if (session.id === activeId.value) scrollBottom();
   }
 }
 
@@ -399,7 +654,8 @@ async function sendText(raw) {
   session.planOpen = false;
   session.checks = [];
   runningId.value = session.id;
-  push('status', t('chat.thinking'), {}, session);
+  session.working = { tool: 'think', message: t('chat.thinking') };
+  push('status', t('chat.thinking'), { live: true }, session);
 
   let result;
   try {
@@ -418,6 +674,7 @@ async function sendText(raw) {
   }
 
   session.messages = session.messages.filter((item) => item.role !== 'status');
+  session.working = null;
   if (result.success) {
     const reply = result.reply || t('chat.done');
     if (result.applied?.length) emit('applied', result.applied);

@@ -1,10 +1,19 @@
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
+const {
+    isMac,
+    isLinux,
+    electronDistBinary,
+    electronCacheDir,
+} = require('../utils/runtimePlatform');
 
 const root = path.join(__dirname, '..');
-const cacheDir = path.join(root, '.electron-cache');
-fs.mkdirSync(cacheDir, { recursive: true });
+const cacheDir = electronCacheDir(root);
+const electronEnv = {
+    ...process.env,
+    electron_config_cache: cacheDir,
+};
 
 const electronPkg = path.join(root, 'node_modules', 'electron', 'package.json');
 if (!fs.existsSync(electronPkg)) {
@@ -13,13 +22,17 @@ if (!fs.existsSync(electronPkg)) {
 
 const electronDist = path.join(root, 'node_modules', 'electron', 'dist');
 const appPath = path.join(electronDist, 'Electron.app');
-const binary = process.platform === 'win32'
-    ? path.join(electronDist, 'electron.exe')
-    : path.join(appPath, 'Contents', 'MacOS', 'Electron');
+const binary = electronDistBinary(electronDist);
 
 function unquarantineMac() {
-    if (process.platform !== 'darwin' || !fs.existsSync(appPath)) return;
-    spawnSync('xattr', ['-cr', appPath], { stdio: 'ignore' });
+    if (!isMac || !fs.existsSync(appPath)) return;
+    spawnSync('xattr', ['-cr', appPath], { stdio: 'ignore', timeout: 15000 });
+}
+
+function ensureExecutable() {
+    if (isLinux && fs.existsSync(binary)) {
+        try { fs.chmodSync(binary, 0o755); } catch { /* ignore */ }
+    }
 }
 
 if (!fs.existsSync(binary)) {
@@ -31,10 +44,7 @@ if (!fs.existsSync(binary)) {
     const result = spawnSync(process.execPath, [installScript], {
         cwd: root,
         stdio: 'inherit',
-        env: {
-            ...process.env,
-            electron_config_cache: cacheDir,
-        },
+        env: electronEnv,
     });
 
     if ((result.status ?? 1) !== 0) {
@@ -43,17 +53,35 @@ if (!fs.existsSync(binary)) {
 }
 
 unquarantineMac();
+ensureExecutable();
 
 const ptyDir = path.join(root, 'node_modules', 'node-pty');
 if (fs.existsSync(ptyDir)) {
-    spawnSync('npx', ['electron-rebuild', '-f', '-w', 'node-pty'], {
-        cwd: root,
-        stdio: 'ignore',
-        env: {
-            ...process.env,
-            electron_config_cache: cacheDir,
-        },
-    });
+    let rebuildCli = '';
+    try {
+        rebuildCli = require.resolve('@electron/rebuild/lib/cli.js');
+    } catch {
+        rebuildCli = '';
+    }
+
+    if (rebuildCli) {
+        let electronVersion = '';
+        try {
+            electronVersion = require(electronPkg).version;
+        } catch {
+            electronVersion = '';
+        }
+
+        const args = [rebuildCli, '-f', '-w', 'node-pty'];
+        if (electronVersion) args.push('-v', electronVersion);
+
+        spawnSync(process.execPath, args, {
+            cwd: root,
+            stdio: 'ignore',
+            env: electronEnv,
+            timeout: 180000,
+        });
+    }
 }
 
 process.exit(0);

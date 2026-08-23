@@ -1,37 +1,56 @@
 {
-  "name": "nanologin",
-  "version": "1.0.0",
+  "name": "nowk-ide",
+  "version": "1.0.1",
   "description": "Programming IDE with browser profiles",
   "main": "index.js",
+  "bin": {
+    "nowk": "bin/nowk.js"
+  },
+  "files": [
+    "bin",
+    "chrome",
+    "utils",
+    "scripts/postinstall.js",
+    "dist-ui",
+    "index.js",
+    "preload.js",
+    "README.md"
+  ],
   "scripts": {
     "postinstall": "node scripts/postinstall.js",
-    "setup": "mkdir -p .electron-cache && electron_config_cache=\"$(pwd)/.electron-cache\" npm install",
+    "setup": "npm install",
     "build:ui": "vite build",
     "dev:ui": "vite",
-    "start": "vite build && electron . --dev",
+    "start": "node bin/nowk.js start",
     "dev": "concurrently -k \"vite\" \"wait-on http://localhost:5173 && cross-env ELECTRON_RENDERER_URL=http://localhost:5173 electron . --dev\"",
     "build": "vite build && electron-builder",
-    "dist": "vite build && electron-builder --win --x64"
+    "dist": "vite build && electron-builder --win --x64",
+    "prepublishOnly": "npm run build:ui"
   },
   "keywords": [
     "ide",
     "editor",
-    "profile"
+    "nowk",
+    "electron"
   ],
   "author": "",
   "license": "ISC",
-  "devDependencies": {
-    "@electron/rebuild": "^4.2.0",
-    "@vitejs/plugin-vue": "^5.2.4",
-    "concurrently": "^9.1.2",
-    "cross-env": "^7.0.3",
-    "electron": "^35.7.5",
-    "electron-builder": "^25.1.8",
-    "vite": "^6.3.5",
-    "vue": "^3.5.16",
-    "wait-on": "^8.0.3"
+  "publishConfig": {
+    "access": "public"
   },
-  "dependencies": {
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
     "@codemirror/commands": "^6.11.0",
     "@codemirror/lang-css": "^6.3.1",
     "@codemirror/lang-html": "^6.4.12",
@@ -45,15 +64,28 @@
     "@codemirror/state": "^6.7.1",
     "@codemirror/view": "^6.43.9",
     "@lezer/highlight": "^1.2.3",
+    "@vitejs/plugin-vue": "^5.2.4",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
-    "node-pty": "^1.1.0",
+    "concurrently": "^9.1.2",
+    "cross-env": "^7.0.3",
+    "electron-builder": "^25.1.8",
     "prettier": "^3.9.6",
-    "puppeteer-core": "^24.20.0",
-    "vue-i18n": "^9.14.5"
+    "vite": "^6.3.5",
+    "vue": "^3.5.16",
+    "vue-i18n": "^9.14.5",
+    "wait-on": "^8.0.3"
+  },
+  "dependencies": {
+    "@electron/rebuild": "^4.2.0",
+    "electron": "^35.7.5",
+    "puppeteer-core": "^24.20.0"
+  },
+  "optionalDependencies": {
+    "node-pty": "^1.1.0"
   },
   "build": {
-    "appId": "com.nanologin.app",
+    "appId": "com.nowk.app",
     "productName": "NowK IDE",
     "files": [
       "**/*",
@@ -71,6 +103,12 @@
       "target": [
         "dmg"
       ]
+    },
+    "linux": {
+      "target": [
+        "AppImage"
+      ],
+      "category": "Development"
     },
     "nsis": {
       "oneClick": false,

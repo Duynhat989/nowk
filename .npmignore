@@ -1,0 +1,14 @@
+*
+!bin/
+!bin/**
+!chrome/
+!chrome/**
+!utils/
+!utils/**
+!scripts/
+!scripts/postinstall.js
+!dist-ui/
+!dist-ui/**
+!index.js
+!preload.js
+!README.md
