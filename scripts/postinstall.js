@@ -20,9 +20,19 @@ if (!fs.existsSync(electronPkg)) {
     process.exit(0);
 }
 
-const electronDist = path.join(root, 'node_modules', 'electron', 'dist');
+const electronDir = path.join(root, 'node_modules', 'electron');
+const electronDist = path.join(electronDir, 'dist');
 const appPath = path.join(electronDist, 'Electron.app');
 const binary = electronDistBinary(electronDist);
+const installScript = path.join(electronDir, 'install.js');
+
+function rmDist() {
+    try {
+        fs.rmSync(electronDist, { recursive: true, force: true });
+    } catch {
+        /* ignore */
+    }
+}
 
 function unquarantineMac() {
     if (!isMac || !fs.existsSync(appPath)) return;
@@ -35,20 +45,25 @@ function ensureExecutable() {
     }
 }
 
-if (!fs.existsSync(binary)) {
-    const installScript = path.join(root, 'node_modules', 'electron', 'install.js');
-    if (!fs.existsSync(installScript)) {
-        process.exit(0);
-    }
-
+function runElectronInstall() {
+    if (!fs.existsSync(installScript)) return 0;
     const result = spawnSync(process.execPath, [installScript], {
         cwd: root,
         stdio: 'inherit',
         env: electronEnv,
     });
+    return result.status ?? 1;
+}
 
-    if ((result.status ?? 1) !== 0) {
-        process.exit(result.status ?? 1);
+if (!fs.existsSync(binary)) {
+    rmDist();
+    let status = runElectronInstall();
+    if (status !== 0 || !fs.existsSync(binary)) {
+        rmDist();
+        status = runElectronInstall();
+    }
+    if (status !== 0) {
+        process.exit(status);
     }
 }
 
@@ -57,30 +72,24 @@ ensureExecutable();
 
 const ptyDir = path.join(root, 'node_modules', 'node-pty');
 if (fs.existsSync(ptyDir)) {
-    let rebuildCli = '';
+    const { rebuildPty, chmodSpawnHelpers } = require('./rebuild-pty');
+    chmodSpawnHelpers(ptyDir);
+    let electronVersion = '';
     try {
-        rebuildCli = require.resolve('@electron/rebuild/lib/cli.js');
+        electronVersion = require(electronPkg).version;
     } catch {
-        rebuildCli = '';
+        electronVersion = '';
     }
-
-    if (rebuildCli) {
-        let electronVersion = '';
-        try {
-            electronVersion = require(electronPkg).version;
-        } catch {
-            electronVersion = '';
-        }
-
-        const args = [rebuildCli, '-f', '-w', 'node-pty'];
-        if (electronVersion) args.push('-v', electronVersion);
-
-        spawnSync(process.execPath, args, {
-            cwd: root,
-            stdio: 'ignore',
-            env: electronEnv,
-            timeout: 180000,
-        });
+    const rebuilt = rebuildPty({
+        root,
+        electronDir,
+        electronVersion,
+        electronBinary: binary,
+    });
+    chmodSpawnHelpers(ptyDir);
+    if (!rebuilt.ok) {
+        console.warn('[nowk] Terminal PTY rebuild failed:', rebuilt.error);
+        console.warn('[nowk] On macOS install Xcode CLT: xcode-select --install');
     }
 }
 

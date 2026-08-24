@@ -369,6 +369,10 @@ function salvageActions(text) {
             if (slice[q] === '"') return extractQuotedLenient(slice, q).value;
             return undefined;
         };
+        const numField = (key) => {
+            const hit = slice.match(new RegExp(`"${key}"\\s*:\\s*(\\d+)`));
+            return hit ? Number(hit[1]) : undefined;
+        };
         const action = normalizeAction({
             type,
             path: pathM ? decodeJsonish(pathM[1]) : '',
@@ -377,6 +381,9 @@ function salvageActions(text) {
             old: pullQuoted('old'),
             new: pullQuoted('new'),
             content,
+            start: numField('start'),
+            end: numField('end'),
+            lines: numField('lines'),
         });
         if (action && !isExampleAction(action)) actions.push(action);
         match = re.exec(text);
@@ -431,13 +438,18 @@ function mergeActions(lists) {
     for (const list of lists) {
         for (const action of list || []) {
             if (!action) continue;
-            const key = `${action.type}:${action.path || action.command || action.query || ''}`;
+            const key = action.type === 'read_file'
+                ? `${action.type}:${action.path || ''}:${action.start || ''}:${action.end || ''}`
+                : `${action.type}:${action.path || action.command || action.query || ''}`;
             const prev = map.get(key);
             if (!prev) {
                 map.set(key, action);
                 continue;
             }
             if (String(action.content || '').length > String(prev.content || '').length) {
+                map.set(key, action);
+            }
+            if (action.type === 'read_file' && (action.start || action.end) && !(prev.start || prev.end)) {
                 map.set(key, action);
             }
         }

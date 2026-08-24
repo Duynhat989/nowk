@@ -20,6 +20,12 @@ const execFileAsync = promisify(execFile);
 const { listKinds, promptFor, scaffoldFiles } = require('./utils/projectTemplates');
 
 const isDev = process.argv.includes('--dev');
+process.env.TERM_PROGRAM = 'NowK';
+process.env.SHELL_SESSIONS_DISABLE = '1';
+delete process.env.TERM_SESSION_ID;
+delete process.env.ITERM_SESSION_ID;
+delete process.env.SHELL_SESSION_DID_RESTORE;
+delete process.env.SSH_TTY;
 const runningBrowsers = new Map();
 const profileOwners = new Map();
 

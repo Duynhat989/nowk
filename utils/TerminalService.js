@@ -1,4 +1,5 @@
 const { spawn } = require('child_process');
+const fs = require('fs');
 const path = require('path');
 const {
     isWin,
@@ -7,6 +8,7 @@ const {
     shellRunArgs,
     killProcessTree,
 } = require('./runtimePlatform');
+const { loadPty } = require('../scripts/rebuild-pty');
 
 const DANGEROUS = /\brm\s+(-[a-zA-Z]*rf|--no-preserve-root)|mkfs\b|dd\s+if=|shutdown\b|reboot\b/i;
 const MAX_AGENT = 8000;
@@ -26,41 +28,65 @@ function isStartCommand(command) {
 }
 
 function shellEnv(cols, rows) {
-    return {
-        ...process.env,
+    const env = {};
+    for (const [key, value] of Object.entries(process.env)) {
+        if (typeof key !== 'string' || typeof value !== 'string') continue;
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
+        env[key] = value;
+    }
+    Object.assign(env, {
         TERM: 'xterm-256color',
         COLORTERM: 'truecolor',
+        TERM_PROGRAM: 'NowK',
+        SHELL_SESSIONS_DISABLE: '1',
         COLUMNS: String(cols || 80),
         LINES: String(rows || 24),
-    };
+    });
+    delete env.TERM_SESSION_ID;
+    delete env.ITERM_SESSION_ID;
+    delete env.SHELL_SESSION_DID_RESTORE;
+    delete env.SSH_TTY;
+    delete env.WINDOWID;
+    delete env.TMUX;
+    delete env.TMUX_PANE;
+    delete env.STY;
+    delete env.WINDOW;
+    delete env.TERMCAP;
+    env.SHELL = isWin ? (env.ComSpec || 'cmd.exe') : '/bin/zsh';
+    if (!isWin) {
+        const extras = ['/opt/homebrew/bin', '/opt/homebrew/sbin', '/usr/local/bin'];
+        const parts = String(env.PATH || '/usr/bin:/bin').split(':').filter(Boolean);
+        for (const item of extras) {
+            if (!parts.includes(item) && fs.existsSync(item)) parts.unshift(item);
+        }
+        env.PATH = parts.join(':');
+    }
+    return env;
 }
 
 function spawnInteractive(cwd, cols, rows) {
     const env = shellEnv(cols, rows);
     const shell = defaultShell();
+    const args = interactiveShellArgs();
+    const pty = loadPty();
+    if (!pty) {
+        return { error: 'node-pty is not available for this Electron build' };
+    }
     try {
-        const pty = require('node-pty');
         return {
             kind: 'pty',
-            proc: pty.spawn(shell, interactiveShellArgs(), {
+            proc: pty.spawn(shell, args, {
                 name: 'xterm-256color',
                 cols: cols || 80,
                 rows: rows || 24,
                 cwd,
                 env,
+                encoding: 'utf8',
                 useConpty: isWin,
             }),
         };
-    } catch {
-        return {
-            kind: 'pipe',
-            proc: spawn(shell, isWin ? [] : ['-i'], {
-                cwd,
-                env,
-                windowsHide: true,
-                stdio: ['pipe', 'pipe', 'pipe'],
-            }),
-        };
+    } catch (err) {
+        return { error: err.message || 'PTY spawn failed' };
     }
 }
 
@@ -204,6 +230,9 @@ class TerminalService {
         }
         if (existing) this.stopSession(sid);
         const started = spawnInteractive(folder, cols, rows);
+        if (started.error || !started.proc) {
+            return { ok: false, error: started.error || 'Could not start PTY' };
+        }
         const session = {
             id: sid,
             ...started,

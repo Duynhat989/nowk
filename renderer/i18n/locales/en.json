@@ -90,7 +90,8 @@
     "cwd": "cwd",
     "byAgent": "Agent ran this",
     "exit": "exit {code}",
-    "started": "running in background"
+    "started": "running in background",
+    "shellFailed": "Shell crashed repeatedly. Close this tab and open a new terminal."
   },
   "welcome": {
     "title": "NowK",

@@ -161,6 +161,9 @@ async function startSession(id) {
       tab.title = nextTitle(result.title, id);
     }
   }
+  if (result && result.ok === false && result.error) {
+    writeChunk(id, `\r\n\x1b[31m${result.error}\x1b[0m\r\n`);
+  }
 }
 
 async function ensureJobTab(data) {
@@ -344,6 +347,11 @@ function onEvent(data) {
     const entry = terms.get(id);
     const tab = tabs.value.find((item) => item.id === id);
     if (!entry || entry.job || tab?.kind === 'job') return;
+    entry.crashAt = [...(entry.crashAt || []), Date.now()].filter((t) => Date.now() - t < 8000);
+    if (entry.crashAt.length >= 4) {
+      writeChunk(id, `\r\n\x1b[31m${t('terminal.shellFailed')}\x1b[0m\r\n`);
+      return;
+    }
     clearTimeout(entry.restartTimer);
     entry.restartTimer = setTimeout(() => startSession(id), 400);
   }

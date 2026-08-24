@@ -2,7 +2,7 @@
 
 Desktop IDE (Electron) for **macOS**, **Windows**, and **Linux**. Open a project, edit code, run a terminal, manage Chrome profiles, and use **Agent** so AI can read and change the real repo on disk — models (Gemini, ChatGPT, DeepSeek) run in a Chrome tab; NowK executes the tools.
 
-**Version:** 1.2.0 · **License:** [ISC](#license)
+**Version:** 1.2.6 · **License:** [ISC](#license)
 
 ---
 
@@ -90,11 +90,13 @@ UI slogan: *You think it. Agent writes the code.*
 1. Open Chrome and a model tab (Gemini / ChatGPT / DeepSeek).
 2. Select a project in NowK.
 3. Describe the work (UI changes, bug fixes, paste a console stack…).
-4. Agent surveys the file tree, plans, creates or edits real files on disk, and runs the terminal to verify.
+4. Agent routes through **AG Kit** (`.agents/`): match rules / skills / workflows / specialist agents, load only those files, then edit the real repo and **verify with terminal output**.
 
 - Tools: read, edit (`edit_file`), create files, search, retrieve via index, git status, browser / screenshot when needed
 - Diff after a successful write; checks that disk content matches
-- Does not mark work done merely by editing `package.json` or the README
+- Does not mark work done merely by editing files — a run/test/start with real output is required
+- Destructive shell commands are blocked by the AG Kit hook before they run
+- Slash workflows such as `/debug` or `/create` select the matching procedure from `.agents/workflows/`
 
 ### Chrome profiles
 

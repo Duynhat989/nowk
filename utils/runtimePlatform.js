@@ -37,9 +37,9 @@ function defaultShell() {
         ]) || 'cmd.exe';
     }
     return firstExisting([
-        process.env.SHELL,
         '/bin/zsh',
         '/usr/bin/zsh',
+        process.env.SHELL,
         '/bin/bash',
         '/usr/bin/bash',
         '/bin/sh',
@@ -49,7 +49,7 @@ function defaultShell() {
 
 function interactiveShellArgs() {
     if (isWin) return [];
-    return isMac ? ['-il'] : ['-i'];
+    return ['-i'];
 }
 
 function shellRunArgs(command) {

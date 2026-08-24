@@ -50,12 +50,18 @@ function launch(electronArgs) {
         ? ['--no-sandbox', ...electronArgs]
         : electronArgs;
 
+    const env = { ...process.env, TERM_PROGRAM: 'NowK', SHELL_SESSIONS_DISABLE: '1' };
+    delete env.TERM_SESSION_ID;
+    delete env.ITERM_SESSION_ID;
+    delete env.SHELL_SESSION_DID_RESTORE;
+    delete env.SSH_TTY;
+
     const child = spawn(electronBinary(), [root, ...extra], {
-        stdio: 'inherit',
+        stdio: isWin ? 'inherit' : ['ignore', 'inherit', 'inherit'],
         cwd: process.cwd(),
-        env: process.env,
+        env,
         windowsHide: false,
-        detached: false,
+        detached: !isWin,
     });
 
     const forward = (signal) => {

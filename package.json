@@ -1,6 +1,6 @@
 {
   "name": "nowk-ide",
-  "version": "1.2.0",
+  "version": "1.2.6",
   "description": "NowK — programming IDE with browser profiles",
   "main": "index.js",
   "bin": {
@@ -11,21 +11,25 @@
     "chrome",
     "utils",
     "scripts/postinstall.js",
+    "scripts/preinstall.js",
+    "scripts/rebuild-pty.js",
     "dist-ui",
     "index.js",
     "preload.js",
     "build/icon.png",
     "build/icon.icns",
     "build/icon.ico",
-    "README.md"
+    "README.md",
+    ".agents"
   ],
   "scripts": {
+    "preinstall": "node scripts/preinstall.js",
     "postinstall": "node scripts/postinstall.js",
     "setup": "npm install",
     "build:ui": "vite build",
     "dev:ui": "vite",
     "start": "node bin/nowk.js start",
-    "dev": "concurrently -k \"vite\" \"wait-on http://localhost:5173 && cross-env ELECTRON_RENDERER_URL=http://localhost:5173 electron . --dev\"",
+    "dev": "concurrently -k \"vite\" \"wait-on http://localhost:24202 && cross-env ELECTRON_RENDERER_URL=http://localhost:24202 electron . --dev\"",
     "build": "vite build && electron-builder",
     "dist": "vite build && electron-builder --win --x64",
     "prepublishOnly": "npm run build:ui"
@@ -83,10 +87,8 @@
   "dependencies": {
     "@electron/rebuild": "^4.2.0",
     "electron": "^35.7.5",
+    "node-pty": "^1.1.0",
     "puppeteer-core": "^24.20.0"
-  },
-  "optionalDependencies": {
-    "node-pty": "^1.1.0"
   },
   "build": {
     "appId": "com.nowk.app",

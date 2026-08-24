@@ -17,7 +17,7 @@ module.exports = defineConfig({
         emptyOutDir: true,
     },
     server: {
-        port: 5173,
+        port: 24202,
         strictPort: true,
     },
 });

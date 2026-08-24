@@ -90,7 +90,8 @@
     "cwd": "cwd",
     "byAgent": "Agent chạy",
     "exit": "exit {code}",
-    "started": "đang chạy nền"
+    "started": "đang chạy nền",
+    "shellFailed": "Shell thoát liên tục. Đóng tab này rồi mở terminal mới."
   },
   "welcome": {
     "title": "NowK",

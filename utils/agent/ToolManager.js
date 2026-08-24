@@ -52,6 +52,7 @@ class ToolManager {
         this.controller = extras.controller || null;
         this.siteIndex = extras.siteIndex || null;
         this.indexer = extras.indexer || null;
+        this.hooks = extras.hooks || null;
     }
 
     async run(action) {
@@ -552,6 +553,11 @@ class ToolManager {
     runCommand(command, { background } = {}) {
         const cmd = String(command || '').trim();
         if (!cmd) return Promise.resolve({ ok: false, type: 'run_command', error: 'Missing command' });
+        const gated = this.hooks?.gateAction?.({ type: 'run_command', command: cmd })
+            || this.hooks?.gateAction?.({ type: 'run_command', command: cmd });
+        if (gated && gated.ok === false) {
+            return Promise.resolve({ ok: false, type: 'run_command', command: cmd, error: gated.reason || 'Command blocked by AG Kit hook' });
+        }
         if (DANGEROUS.test(cmd)) {
             return Promise.resolve({ ok: false, type: 'run_command', error: 'Command blocked' });
         }

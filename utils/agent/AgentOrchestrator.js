@@ -10,6 +10,8 @@ const { checkWiring, formatWiring } = require('./WiringCheck');
 const { checkBehavior, formatBehavior, wantsControl } = require('./BehaviorCheck');
 const { splitRequirements, parseAiPlan, planPrompt, formatRequirements, kindProgress, formatKindBlock, kindMeta } = require('./Requirements');
 const { toDiffLines, fileAddedLines } = require('./diffHunk');
+const AgKitRuntime = require('./AgKitRuntime');
+const AgKitHooks = require('./AgKitHooks');
 
 const MAX_ITERS = 20;
 const WRITE_TOOLS = new Set(['mkdir', 'create_file', 'edit_file', 'delete_file', 'run_command', 'run_test', 'run_build', 'run_start', 'run_stop']);
@@ -45,7 +47,9 @@ Loop: split ALL user requirements → classify each (feature/bugfix/update/...) 
 - STYLE/restyle of "all UI": edit every Vue/CSS in RELATION TREE. One extra theme file is not enough.
 - edit_file: copy old EXACTLY from numbered lines. Do not redeclare the same identifier.
 - When the request actually works (UI + behavior + shared data): actions=[] done=true.
-- Never say you lack tools.`;
+- Never say you lack tools.
+- AG Kit: rules are mandatory, skills are capabilities, workflows are procedures, agents are who executes. Only the KIT CONTEXT in this turn is loaded — do not assume the rest of .agents is in memory.
+- Editing files is not completion. After code changes you MUST run_command / run_test / run_start, read the real output, fix failures, and only then done=true.`;
 
 const TURN = `Return only that JSON. Escape quotes as \\".`;
 
@@ -157,9 +161,16 @@ function wiringLeft(state, task) {
     return false;
 }
 
+function needsEvidence(state, task) {
+    if (wantsVerify(task) && !hasRun(state)) return true;
+    if (wantsFileWork(task) && (state.filesChanged || []).length && !hasRun(state)) return true;
+    return false;
+}
+
 function taskSatisfied(state, task) {
     if ((state.truncated || []).length) return false;
     if ((state.currentErrors || []).length || state.batchFailed) return false;
+    if (needsEvidence(state, task)) return false;
     if (wantsVerify(task) && !wantsFileWork(task)) return hasRun(state);
     if (wantsFileWork(task) && !(state.filesChanged || []).length) return false;
     if (wiringLeft(state, task) || behaviorLeft(state, task)) return false;
@@ -173,8 +184,9 @@ function extractLineRange(text, path) {
     const base = String(path || '').split('/').pop();
     if (!base) return null;
     const escaped = base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const span = '(?:lines?|dòng(?:s)?)\\s+(\\d+)\\s*(?:to|đến|-|–)\\s*(\\d+)';
     const near = new RegExp(
-        `(?:${escaped}[^\\n]{0,80})?lines?\\s+(\\d+)\\s*(?:to|-|–)\\s*(\\d+)|lines?\\s+(\\d+)\\s*(?:to|-|–)\\s*(\\d+)[^\\n]{0,80}${escaped}`,
+        `(?:${escaped}[^\\n]{0,80})?${span}|${span}[^\\n]{0,80}${escaped}`,
         'i',
     );
     const match = src.match(near);
@@ -183,6 +195,13 @@ function extractLineRange(text, path) {
     const end = Number(match[2] || match[4]);
     if (!start || !end || end < start) return null;
     return { start, end };
+}
+
+function readSliceKey(action) {
+    const start = Number(action.start) || 0;
+    const end = Number(action.end) || 0;
+    if (start || end) return `${action.path}#${start}-${end || start}`;
+    return action.path;
 }
 
 function attachReadRanges(actions, parsed) {
@@ -198,17 +217,29 @@ function dropDuplicateReads(actions, state) {
     const kept = [];
     const skipped = [];
     const seen = new Set();
+    const logged = new Set(
+        (state.toolLog || [])
+            .filter((item) => item.type === 'read_file' && item.detail)
+            .map((item) => item.detail),
+    );
     for (const action of actions || []) {
         if (action.type !== 'read_file' || !action.path) {
             kept.push(action);
             continue;
         }
-        const already = seen.has(action.path) || (state.filesRead || []).includes(action.path);
-        if (already) {
-            skipped.push(action.path);
+        const ranged = Boolean(action.start || action.end);
+        const key = readSliceKey(action);
+        const sameSlice = seen.has(key) || logged.has(key);
+        const sameFull = !ranged && (
+            seen.has(action.path)
+            || logged.has(action.path)
+            || (state.filesRead || []).includes(action.path)
+        );
+        if (sameSlice || sameFull) {
+            skipped.push(ranged ? key : action.path);
             continue;
         }
-        seen.add(action.path);
+        seen.add(key);
         kept.push(action);
     }
     return { actions: kept, skipped: [...new Set(skipped)] };
@@ -218,6 +249,7 @@ function workLeft(state, task) {
     if ((state.truncated || []).length) return true;
     if ((state.currentErrors || []).length || state.batchFailed) return true;
     if ((state.requirements || []).length && state.reqIndex < state.requirements.length) return true;
+    if (needsEvidence(state, task)) return true;
     if (wantsVerify(task) && !wantsFileWork(task)) return !hasRun(state);
     if (wantsFileWork(task) && !(state.filesChanged || []).length) return true;
     if (wiringLeft(state, task)) return true;
@@ -519,9 +551,9 @@ class AgentOrchestrator {
 
     injectVerify(tools, state, task, parsed) {
         if (parsed.actions.length || hasRun(state)) return parsed;
-        if (!wantsVerify(task)) return parsed;
-        if (wantsFileWork(task) && !state.filesChanged.length) return parsed;
-        if (wantsFileWork(task) && !state.proofed) return parsed;
+        const afterEdits = wantsFileWork(task) && (state.filesChanged || []).length;
+        if (!wantsVerify(task) && !afterEdits) return parsed;
+        if (wantsFileWork(task) && !(state.filesChanged || []).length) return parsed;
         const suggested = tools.suggestVerifyAction(task, state.filesChanged);
         if (!suggested) return parsed;
         this.emit('step', `Tự chạy terminal: ${suggested.command}`);
@@ -1054,7 +1086,11 @@ ${TURN}`;
             }
             if (!result.ok && action.type === 'edit_file' && /old không khớp/i.test(String(result.error || ''))) {
                 try {
-                    const snap = await tools.run({ type: 'read_file', path: action.path });
+                    const snap = await tools.run({
+                        type: 'read_file',
+                        path: action.path,
+                        query: String(action.old || '').slice(0, 160),
+                    });
                     if (snap?.ok && snap.result) {
                         result = {
                             ...result,
@@ -1106,7 +1142,10 @@ ${TURN}`;
                     new: action.new != null ? String(action.new).slice(0, 8000) : '',
                 });
             }
-            state.recordTool(action.type, action.path || action.command || action.query || '');
+            state.recordTool(
+                action.type,
+                action.type === 'read_file' ? readSliceKey(action) : (action.path || action.command || action.query || ''),
+            );
             if (result.ok && action.type === 'read_file' && action.path && !quiet) {
                 readPaths.push(action.path);
             }
@@ -1199,11 +1238,15 @@ ${TURN}`;
         this.aborted = false;
         const task = String(message || '').trim();
         const state = new AgentState(task);
+        const kit = AgKitRuntime.route(root, task);
+        state.kitPack = kit;
+        this.emit('step', kit.announcement);
         const tools = new ToolManager(this.workspace, root, this.terminalService, {
             retriever: this.retriever,
             controller,
             siteIndex: this.siteIndex,
             indexer: this.indexer,
+            hooks: AgKitHooks,
         });
         const adapter = new GeminiWebAdapter(this.gemini);
         const appliedAll = [];
@@ -1230,6 +1273,8 @@ ${TURN}`;
 
         const firstPrompt = () => `${PROTOCOL}
 
+${kit.prompt}
+
 ${state.projectBrief || '(no retrieved context)'}
 
 TASK:
@@ -1250,7 +1295,7 @@ ${wantsVerify(task) && !wantsFileWork(task) && state.requirements.length <= 1
                 const head = `${item.type}${item.path ? ` ${item.path}` : ''}${item.command ? ` ${item.command}` : ''}`;
                 return `### ${head}\n${item.error || item.result || ''}`;
             }).join('\n\n');
-            let extra = '';
+            let extra = `\n${kit.reminder}`;
             const failed = (results || []).filter((item) => item && item.ok === false);
             if (failed.length) {
                 extra = `\nTOOLS FAILED — do not stop, do not done=true. Fix them now:\n${failed.map((item) => `- ${item.type} ${item.path || ''}: ${item.error || item.result || 'failed'}`).join('\n')}\nIf the path does not exist, emit create_file with full content. Then continue the KIND playbook.`;
@@ -1392,6 +1437,9 @@ ${TURN}`);
             }
 
             if (!parsed.actions.length) {
+                parsed = this.injectVerify(tools, state, task, parsed);
+            }
+            if (!parsed.actions.length) {
                 if (this.shouldAdvanceRequirement(state, parsed, task, empty)) {
                     state.advanceRequirement();
                     this.emitPlan(state);
@@ -1479,6 +1527,7 @@ ${TURN}`);
             reply = `Đã sửa ${changed.length} file: ${changed.join(', ')}.`;
         }
         state.status = 'completed';
+        AgKitRuntime.remember(root, kit, task, changed);
         this.emit('status', 'Hoàn tất.');
         this.emit('done', reply, { applied: appliedAll, state: state.snapshot() });
         return {
