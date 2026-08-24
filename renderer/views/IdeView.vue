@@ -1,10 +1,10 @@
 <template>
   <div class="ide">
-    <header class="ide-toolbar">
+    <header class="ide-toolbar" :class="{ mac: isMac }">
       <div class="ide-toolbar-left">
-        <span class="ide-mark">N</span>
+        <img class="ide-mark" src="../assets/icon.png" alt="NowK" width="22" height="22">
         <div class="ide-project">
-          <span class="ide-project-name">{{ projectName || t('ide.noFolder') }}</span>
+          <span class="ide-project-name">{{ projectName || t('ide.title') }}</span>
           <span v-if="runningProfile" class="ide-project-meta">{{ runningProfile.name }}</span>
         </div>
       </div>
@@ -48,6 +48,9 @@
         </button>
         </template>
         <span class="ide-tool-sep" />
+        <span v-if="auth.balance != null" class="ide-auth-chip" :title="t('auth.balance')">
+          {{ t('auth.balanceShort', { n: auth.balance }) }}
+        </span>
         <button
           class="ide-tool profile"
           type="button"
@@ -64,7 +67,7 @@
           :title="t('ide.settings')"
           @click="settingsOpen = true"
         >
-          <svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="2"/><path d="M8 2.5v1.6M8 11.9v1.6M2.5 8h1.6M11.9 8h1.6M4.1 4.1l1.1 1.1M10.8 10.8l1.1 1.1M4.1 11.9l1.1-1.1M10.8 5.2l1.1-1.1"/></svg>
+          <svg viewBox="0 0 16 16"><path d="M6.35 1.7h3.3l.4 1.6c.42.16.8.4 1.14.7l1.58-.52 1.65 2.86-1.28 1.04c.08.4.08.82 0 1.24l1.28 1.04-1.65 2.86-1.58-.52a4.7 4.7 0 0 1-1.14.7l-.4 1.6H6.35l-.4-1.6a4.7 4.7 0 0 1-1.14-.7l-1.58.52-1.65-2.86 1.28-1.04a4.8 4.8 0 0 1 0-1.24L1.58 6.34 3.23 3.48l1.58.52c.34-.3.72-.54 1.14-.7l.4-1.6z"/><circle cx="8" cy="8" r="2.1"/></svg>
         </button>
       </div>
     </header>
@@ -75,6 +78,8 @@
       @open="openRecent"
       @pick="pickFolder"
       @remove="removeRecent"
+      @created="onProjectCreated"
+      @settings="settingsOpen = true"
     />
 
     <div v-else class="ide-body">
@@ -125,7 +130,35 @@
         </div>
 
         <div v-if="activeTab" class="ide-editor-wrap">
+          <div v-if="isMarkdownTab(activeTab) && activeTab.kind !== 'url'" class="md-switch">
+            <button
+              type="button"
+              :class="{ on: activeTab.preview !== false }"
+              @click="activeTab.preview = true"
+            >{{ t('ide.preview') }}</button>
+            <button
+              type="button"
+              :class="{ on: activeTab.preview === false }"
+              @click="activeTab.preview = false"
+            >{{ t('ide.source') }}</button>
+          </div>
+          <UrlPane
+            v-if="activeTab.kind === 'url'"
+            :key="activeTab.path"
+            :url="activeTab.url"
+            @update:url="onUrlChange"
+            @title="onUrlTitle"
+          />
+          <MarkdownPreview
+            v-else-if="isMarkdownTab(activeTab) && activeTab.preview !== false"
+            :source="activeTab.content"
+            :file-path="activeTab.path"
+            :project-root="projectRoot"
+            @open-url="openUrl"
+            @open-file="openRelFile"
+          />
           <CodeEditor
+            v-else
             ref="editorRef"
             :key="activeTab.path"
             v-model="activeTab.content"
@@ -133,14 +166,14 @@
             @update:model-value="markDirty"
           />
           <footer class="ide-statusbar">
-            <span>{{ activeTab.path }}</span>
-            <span>{{ languageLabel(activeTab.name) }}</span>
+            <span>{{ activeTab.kind === 'url' ? activeTab.url : activeTab.path }}</span>
+            <span>{{ activeTab.kind === 'url' ? t('ide.web') : languageLabel(activeTab.name) }}</span>
             <span v-if="activeTab.dirty">{{ t('ide.unsaved') }}</span>
           </footer>
         </div>
 
         <div v-else class="ide-welcome">
-          <div class="ide-welcome-mark">N</div>
+          <img class="ide-welcome-mark" src="../assets/icon.png" alt="NowK" width="48" height="48">
           <h1>{{ t('ide.welcomeTitle') }}</h1>
           <p v-if="projectName">{{ projectName }}</p>
         </div>
@@ -172,7 +205,7 @@
         ref="chatRef"
         v-show="chatOpen"
         :project-root="projectRoot"
-        :open-file="activeTab ? { path: activeTab.path, lines: (activeTab.content || '').split('\n').length } : null"
+        :open-file="activeTab && activeTab.kind !== 'url' ? { path: activeTab.path, lines: (activeTab.content || '').split('\n').length } : null"
         :style="{ width: `${chatWidth}px` }"
         @applied="onAgentApplied"
         @close="toggleChat"
@@ -193,15 +226,19 @@
       :settings="settings"
       @close="settingsOpen = false"
       @refresh="$emit('refresh-settings')"
+      @logout="$emit('logout')"
     />
   </div>
 </template>
 
 <script setup>
-import { computed, inject, onMounted, onUnmounted, reactive, ref } from 'vue';
+import { computed, inject, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue';
 import { useI18n } from 'vue-i18n';
 import CodeEditor from '../components/CodeEditor.vue';
+import MarkdownPreview from '../components/MarkdownPreview.vue';
+import UrlPane from '../components/UrlPane.vue';
 import FileExplorer from '../components/FileExplorer.vue';
+import { isMarkdownFile } from '../utils/renderMarkdown.js';
 import ProfilePopup from '../components/ProfilePopup.vue';
 import SettingsModal from '../components/SettingsModal.vue';
 import AgentChat from '../components/AgentChat.vue';
@@ -211,12 +248,20 @@ import WelcomeView from './WelcomeView.vue';
 const props = defineProps({
   profiles: { type: Array, default: () => [] },
   settings: { type: Object, default: () => ({}) },
+  auth: { type: Object, default: () => ({ balance: 0 }) },
 });
 
-defineEmits(['refresh-profiles', 'refresh-settings']);
+defineEmits(['refresh-profiles', 'refresh-settings', 'logout']);
 
 const toast = inject('toast');
 const { t } = useI18n();
+const isMac = window.platform === 'darwin';
+
+function sameRel(left, right) {
+  const a = String(left || '').replace(/\\/g, '/').replace(/^\.\//, '').toLowerCase();
+  const b = String(right || '').replace(/\\/g, '/').replace(/^\.\//, '').toLowerCase();
+  return Boolean(a && b && (a === b || a.endsWith(`/${b}`) || b.endsWith(`/${a}`)));
+}
 
 const profilePopupOpen = ref(false);
 const settingsOpen = ref(false);
@@ -230,6 +275,7 @@ let unsubTerminal = null;
 let unsubAgent = null;
 let unsubWorkspace = null;
 let unsubPick = null;
+let unsubEditor = null;
 let reloadTimer = null;
 let resizing = false;
 const editorRef = ref(null);
@@ -248,6 +294,10 @@ const recents = ref([]);
 
 const runningProfile = computed(() => props.profiles.find(p => p.status === 'running') || null);
 const activeTab = computed(() => tabs.value.find(tab => tab.path === activePath.value) || null);
+
+function isMarkdownTab(tab) {
+  return tab?.kind !== 'url' && isMarkdownFile(tab?.name || tab?.path);
+}
 
 function languageLabel(name) {
   const ext = String(name || '').split('.').pop()?.toLowerCase();
@@ -328,6 +378,19 @@ function scheduleExplorerReload(relPath = '', paths = []) {
   }, 160);
 }
 
+async function reloadTabFromDisk(relPath) {
+  const tab = tabs.value.find((item) => sameRel(item.path, relPath));
+  if (!tab || !projectRoot.value) return;
+  const result = await window.api.readWorkspaceFile({
+    root: projectRoot.value,
+    relPath: tab.path,
+  });
+  if (result.success) {
+    tab.content = result.content || '';
+    tab.dirty = false;
+  }
+}
+
 async function onAgentApplied(applied) {
   for (const op of applied || []) {
     if (op.path) revealPath(op.path);
@@ -335,17 +398,8 @@ async function onAgentApplied(applied) {
   }
   await reloadExplorer();
   for (const op of applied || []) {
-    if (op.action !== 'write') continue;
-    const tab = tabs.value.find((item) => item.path === op.path);
-    if (!tab) continue;
-    const result = await window.api.readWorkspaceFile({
-      root: projectRoot.value,
-      relPath: op.path,
-    });
-    if (result.success) {
-      tab.content = result.content || '';
-      tab.dirty = false;
-    }
+    if (op.action !== 'write' || !op.path) continue;
+    await reloadTabFromDisk(op.path);
   }
 }
 
@@ -397,6 +451,14 @@ async function pickFolder() {
   await openProject(result.root, result.name);
 }
 
+async function onProjectCreated(result) {
+  if (!result?.root) return;
+  await openProject(result.root, result.name);
+  chatOpen.value = true;
+  await nextTick();
+  chatRef.value?.setDraft?.(result.prompt || '');
+}
+
 async function toggleDir(node) {
   selectedPath.value = node.path;
   if (openDirs[node.path]) {
@@ -428,12 +490,66 @@ async function openFile(node) {
     return;
   }
   tabs.value.push({
+    kind: 'file',
     path: node.path,
     name: node.name,
     content: result.content || '',
     dirty: false,
+    preview: isMarkdownFile(node.name),
   });
   activePath.value = node.path;
+}
+
+function normalizeHttpUrl(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  if (/^https?:\/\//i.test(raw)) return raw;
+  return `https://${raw}`;
+}
+
+function openUrl(url) {
+  const href = normalizeHttpUrl(url);
+  if (!href || href === 'https://') return;
+  const path = `url:${href}`;
+  const existing = tabs.value.find((tab) => tab.kind === 'url' && (tab.path === path || tab.url === href));
+  if (existing) {
+    activePath.value = existing.path;
+    return;
+  }
+  let host = href;
+  try { host = new URL(href).hostname || href; } catch { /* keep */ }
+  tabs.value.push({
+    kind: 'url',
+    path,
+    name: host,
+    url: href,
+    content: '',
+    dirty: false,
+  });
+  activePath.value = path;
+}
+
+async function openRelFile(relPath) {
+  const rel = String(relPath || '').replace(/\\/g, '/').replace(/^\.\//, '');
+  if (!rel) return;
+  await openFile({ path: rel, name: rel.split('/').pop(), type: 'file' });
+}
+
+function onUrlChange(url) {
+  const tab = activeTab.value;
+  if (tab?.kind !== 'url') return;
+  tab.url = url;
+  const next = `url:${url}`;
+  if (tab.path !== next && !tabs.value.some((item) => item.path === next)) {
+    tab.path = next;
+    activePath.value = next;
+  }
+}
+
+function onUrlTitle(title) {
+  const tab = activeTab.value;
+  if (tab?.kind !== 'url' || !title) return;
+  tab.name = String(title).slice(0, 40);
 }
 
 function selectTab(path) {
@@ -448,7 +564,7 @@ function markDirty() {
 
 async function saveActive() {
   const tab = activeTab.value;
-  if (!tab || !projectRoot.value) return;
+  if (!tab || tab.kind === 'url' || !projectRoot.value) return;
   await editorRef.value?.format?.();
   const result = await window.api.writeWorkspaceFile({
     root: projectRoot.value,
@@ -664,6 +780,20 @@ function startResize(event) {
   window.addEventListener('mouseup', onUp);
 }
 
+async function runEditorCommand(action) {
+  const tab = activeTab.value;
+  if (!tab || tab.kind === 'url') return;
+  if (isMarkdownTab(tab) && tab.preview !== false) {
+    tab.preview = false;
+    await nextTick();
+  }
+  await nextTick();
+  if (action === 'find') editorRef.value?.openFind?.(false);
+  else if (action === 'replace') editorRef.value?.openFind?.(true);
+  else if (action === 'findNext') editorRef.value?.findNext?.();
+  else if (action === 'findPrev') editorRef.value?.findPrev?.();
+}
+
 function onKeydown(event) {
   if (event.key === '`' && (event.metaKey || event.ctrlKey)) {
     event.preventDefault();
@@ -671,6 +801,9 @@ function onKeydown(event) {
     return;
   }
   const meta = event.metaKey || event.ctrlKey;
+  const tag = event.target?.tagName;
+  const typing = tag === 'INPUT' || tag === 'TEXTAREA';
+  const inFind = event.target?.closest?.('.cm-find');
   if (meta && event.key.toLowerCase() === 's') {
     event.preventDefault();
     saveActive();
@@ -683,12 +816,26 @@ function onKeydown(event) {
     event.preventDefault();
     profilePopupOpen.value = true;
   }
+  if (meta && event.key.toLowerCase() === 'f' && !event.shiftKey && !event.altKey) {
+    if (typing && !inFind) return;
+    event.preventDefault();
+    runEditorCommand('find');
+  }
+  if (meta && event.altKey && event.key.toLowerCase() === 'f') {
+    event.preventDefault();
+    runEditorCommand('replace');
+  }
+  if (!isMac && meta && event.key.toLowerCase() === 'h') {
+    event.preventDefault();
+    runEditorCommand('replace');
+  }
 }
 
 onMounted(() => {
   loadRecents();
   window.addEventListener('keydown', onKeydown);
   unsubPick = window.api.onPickProjectRequest?.(pickFolder);
+  unsubEditor = window.api.onEditorCommand?.(runEditorCommand);
   unsubTerminal = window.api.onTerminalEvent?.((data) => {
     if (data?.type === 'start') terminalOpen.value = true;
   });
@@ -707,6 +854,9 @@ onMounted(() => {
     if (data.action === 'delete') {
       (data.paths || [data.path]).forEach((item) => dropDeletedTabs(item));
     }
+    if (data.action === 'write' || data.action === 'create' || data.action === 'rename') {
+      (data.paths || [data.path]).filter(Boolean).forEach((item) => reloadTabFromDisk(item));
+    }
     scheduleExplorerReload(data.path || '', data.paths || []);
   });
 });
@@ -718,5 +868,6 @@ onUnmounted(() => {
   unsubAgent?.();
   unsubWorkspace?.();
   unsubPick?.();
+  unsubEditor?.();
 });
 </script>

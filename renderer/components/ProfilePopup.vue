@@ -118,8 +118,7 @@ const filtered = computed(() => {
 });
 
 function modeLabel(p) {
-  const mode = p.fingerprint?.mode || 'native';
-  return t(`home.modes.${mode}`, mode);
+  return p.startupUrl && p.startupUrl !== 'about:blank' ? p.startupUrl : '';
 }
 
 function proxyLabel(p) {

@@ -5,7 +5,7 @@ const path = require('path');
 const IGNORE_NAMES = new Set([
     'node_modules', '.git', '.venv', 'venv', '__pycache__', '.mypy_cache',
     '.pytest_cache', 'dist', 'dist-ui', '.user_data', '.electron-cache',
-    '.idea', '.vscode', 'site-packages',
+    '.idea', '.vscode', 'site-packages', '.nowk',
 ]);
 
 function ignored(relPath) {

@@ -8,6 +8,7 @@ const SKIP_NAMES = new Set([
     '.DS_Store',
     '.user_data',
     '.electron-cache',
+    '.nowk',
 ]);
 
 const TEXT_EXTENSIONS = new Set([
@@ -19,6 +20,24 @@ const TEXT_EXTENSIONS = new Set([
 ]);
 
 const MAX_READ_BYTES = 2 * 1024 * 1024;
+const MAX_MEDIA_BYTES = 16 * 1024 * 1024;
+const MEDIA_TYPES = {
+    '.png': 'image/png',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.gif': 'image/gif',
+    '.webp': 'image/webp',
+    '.svg': 'image/svg+xml',
+    '.avif': 'image/avif',
+    '.bmp': 'image/bmp',
+    '.ico': 'image/x-icon',
+    '.mp4': 'video/mp4',
+    '.webm': 'video/webm',
+    '.ogg': 'video/ogg',
+    '.ogv': 'video/ogg',
+    '.mov': 'video/quicktime',
+    '.m4v': 'video/mp4',
+};
 
 function normalizeRelPath(relPath, root = '') {
     let s = String(relPath ?? '').replace(/\\/g, '/');
@@ -130,7 +149,7 @@ class WorkspaceService {
         const skipDeep = new Set([
             'node_modules', 'dist', 'dist-ui', '.user_data', '.electron-cache',
             '.venv', 'venv', '__pycache__', '.mypy_cache', '.pytest_cache',
-            'site-packages', '.idea', '.vscode',
+            'site-packages', '.idea', '.vscode', '.nowk',
         ]);
         for (const node of nodes) {
             if (skipDeep.has(node.name)) continue;
@@ -149,7 +168,7 @@ class WorkspaceService {
         const skip = new Set([
             'node_modules', 'dist', 'dist-ui', '.user_data', '.electron-cache',
             '.venv', 'venv', '__pycache__', '.mypy_cache', '.pytest_cache',
-            'site-packages', '.idea', '.vscode', '.git',
+            'site-packages', '.idea', '.vscode', '.git', '.nowk',
         ]);
         const walk = async (rel, depth) => {
             if (hits.length >= 40 || depth > 6) return;
@@ -258,6 +277,22 @@ class WorkspaceService {
         if (!this.isTextFile(filePath)) throw new Error('Không thể mở file nhị phân');
         const content = await fsp.readFile(filePath, 'utf8');
         return { content, size: stat.size };
+    }
+
+    async readMedia(root, relPath) {
+        const filePath = this.resolveSafe(root, relPath);
+        const ext = path.extname(filePath).toLowerCase();
+        const mime = MEDIA_TYPES[ext];
+        if (!mime) throw new Error('Không phải ảnh hoặc video');
+        const stat = await fsp.stat(filePath);
+        if (!stat.isFile()) throw new Error('Không phải file');
+        if (stat.size > MAX_MEDIA_BYTES) throw new Error('File media quá lớn');
+        const buf = await fsp.readFile(filePath);
+        return {
+            mime,
+            size: stat.size,
+            dataUrl: `data:${mime};base64,${buf.toString('base64')}`,
+        };
     }
 
     async writeFile(root, relPath, content) {

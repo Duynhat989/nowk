@@ -2,9 +2,19 @@ function splitLines(text) {
     return String(text ?? '').replace(/\r\n/g, '\n').split('\n');
 }
 
+function fileRemovedLines(content, limit = 80) {
+    const lines = splitLines(content).map((text) => ({ type: 'del', text }));
+    if (lines.length <= limit) return lines;
+    return [...lines.slice(0, limit), { type: 'ctx', text: `… ${lines.length - limit} dòng nữa` }];
+}
+
 function toDiffLines(oldText, newText, limit = 80) {
-    const oldLines = splitLines(oldText);
-    const newLines = splitLines(newText);
+    const oldStr = String(oldText ?? '');
+    const newStr = String(newText ?? '');
+    if (!oldStr && newStr) return fileAddedLines(newStr, limit);
+    if (oldStr && !newStr) return fileRemovedLines(oldStr, limit);
+    const oldLines = splitLines(oldStr);
+    const newLines = splitLines(newStr);
     let start = 0;
     while (start < oldLines.length && start < newLines.length && oldLines[start] === newLines[start]) {
         start += 1;
@@ -42,4 +52,4 @@ function fileAddedLines(content, limit = 80) {
     return [...lines.slice(0, limit), { type: 'ctx', text: `… ${lines.length - limit} dòng nữa` }];
 }
 
-module.exports = { toDiffLines, fileAddedLines };
+module.exports = { toDiffLines, fileAddedLines, fileRemovedLines };

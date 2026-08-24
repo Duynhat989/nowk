@@ -23,15 +23,35 @@ function uniqueVariants(old) {
         text.replace(/\n/g, '\r\n'),
         text.replace(/\t/g, '    '),
         text.replace(/\t/g, '  '),
+        text.replace(/[ \t]+$/gm, ''),
     ];
     return list.filter((item, idx) => item && list.indexOf(item) === idx);
 }
 
+function looksFullRewrite(relPath, neu) {
+    const text = String(neu || '').trim();
+    if (text.length < 40) return false;
+    if (/\.vue$/i.test(relPath)) {
+        return /<template[\s>]/.test(text)
+            && /<\/template>/.test(text)
+            && (/<style[\s>]/.test(text) || /<script[\s>]/.test(text));
+    }
+    if (/\.html?$/i.test(relPath)) {
+        return /<\/html>/i.test(text) || (/<body[\s>]/i.test(text) && /<\/body>/i.test(text));
+    }
+    if (/\.css$/i.test(relPath)) return (text.match(/\{/g) || []).length >= 3;
+    return false;
+}
+
 class ToolManager {
-    constructor(workspaceService, root, terminalService = null) {
+    constructor(workspaceService, root, terminalService = null, extras = {}) {
         this.workspace = workspaceService;
         this.root = root;
         this.terminal = terminalService;
+        this.retriever = extras.retriever || null;
+        this.controller = extras.controller || null;
+        this.siteIndex = extras.siteIndex || null;
+        this.indexer = extras.indexer || null;
     }
 
     async run(action) {
@@ -45,14 +65,17 @@ class ToolManager {
         try {
             if (type === 'list_files') return this.listFiles(action.path || '');
             if (type === 'read_file') return this.readFile(action);
-            if (type === 'search_code' || type === 'find_symbol' || type === 'find_references') {
+            if (type === 'search_code' || type === 'find_symbol' || type === 'find_references' || type === 'grep') {
                 return this.searchCode(action.query || action.path, action.path || '');
             }
+            if (type === 'retrieve') return this.retrieve(action);
+            if (type === 'browser_open') return this.browserOpen(action);
+            if (type === 'screenshot') return this.screenshot(action);
             if (type === 'mkdir') return this.mkdir(action.path);
-            if (type === 'edit_file') return this.patchFile(action);
+            if (type === 'edit_file') return this.editOrCreate(action);
             if (type === 'create_file') return this.writeFile(action);
             if (type === 'delete_file') return this.deleteFile(action.path);
-            if (type === 'run_command') {
+            if (type === 'run_command' || type === 'run_terminal') {
                 if (TerminalService.isStartCommand(action.command)) return this.runStart(action.command);
                 return this.runCommand(action.command, { background: action.background });
             }
@@ -161,7 +184,52 @@ class ToolManager {
             const hits = this.countOcc(text, needle);
             if (hits) return { needle, hits };
         }
+        return this.locateFlexible(text, old);
+    }
+
+    locateFlexible(text, old) {
+        const wanted = String(old ?? '').replace(/\r\n/g, '\n').split('\n');
+        while (wanted.length && !wanted[0].trim()) wanted.shift();
+        while (wanted.length && !wanted[wanted.length - 1].trim()) wanted.pop();
+        if (!wanted.length) return null;
+        const hay = String(text ?? '').replace(/\r\n/g, '\n').split('\n');
+        const modes = [
+            (a, b) => a.trimEnd() === b.trimEnd(),
+            (a, b) => a.trim() === b.trim(),
+        ];
+        for (const same of modes) {
+            const at = [];
+            for (let i = 0; i <= hay.length - wanted.length; i += 1) {
+                let ok = true;
+                for (let j = 0; j < wanted.length; j += 1) {
+                    if (!same(hay[i + j], wanted[j])) {
+                        ok = false;
+                        break;
+                    }
+                }
+                if (ok) at.push(i);
+            }
+            if (!at.length) continue;
+            const start = at[0];
+            return {
+                needle: hay.slice(start, start + wanted.length).join('\n'),
+                hits: at.length,
+            };
+        }
         return null;
+    }
+
+    similarSlice(text, old) {
+        const line = String(old || '').split('\n').map((item) => item.trim()).find((item) => item.length > 10);
+        const lines = String(text || '').split('\n');
+        if (!line) {
+            return lines.slice(0, 18).map((item, idx) => `${idx + 1}| ${item}`).join('\n');
+        }
+        const key = line.slice(0, 48);
+        const at = lines.findIndex((item) => item.includes(key) || item.trim() === line);
+        const from = Math.max(0, (at < 0 ? 0 : at) - 4);
+        const to = Math.min(lines.length, from + 20);
+        return lines.slice(from, to).map((item, idx) => `${from + idx + 1}| ${item}`).join('\n');
     }
 
     hunkProblem(relPath, old, neu) {
@@ -205,6 +273,37 @@ class ToolManager {
         return [];
     }
 
+    pathExists(relPath) {
+        try {
+            const abs = this.workspace.resolveSafe(this.root, relPath);
+            return fs.existsSync(abs);
+        } catch {
+            return false;
+        }
+    }
+
+    async editOrCreate(action) {
+        const relPath = action.path;
+        if (!relPath) return { ok: false, type: 'edit_file', error: 'Missing path' };
+        if (!this.pathExists(relPath)) {
+            const content = action.content != null ? action.content : action.new;
+            if (content != null && String(content).trim()) {
+                return this.writeFile({
+                    type: 'create_file',
+                    path: relPath,
+                    content: String(content),
+                });
+            }
+            return {
+                ok: false,
+                type: 'edit_file',
+                path: relPath,
+                error: `Không tìm thấy file: ${relPath}. Dùng create_file với content đầy đủ — đừng dừng.`,
+            };
+        }
+        return this.patchFile(action);
+    }
+
     async patchFile(action) {
         let relPath = action.path;
         if (!relPath) return { ok: false, type: 'edit_file', error: 'Missing path' };
@@ -227,13 +326,21 @@ class ToolManager {
             if (bad) {
                 return { ok: false, type: 'edit_file', path: relPath, error: bad };
             }
-            const found = this.locateOld(text, patch.old);
+            let found = this.locateOld(text, patch.old);
+            if (!found && patches.length === 1 && looksFullRewrite(relPath, patch.new)) {
+                const prev = text;
+                text = String(patch.new);
+                lastNew = patch.new;
+                notes.push('full rewrite');
+                diff.push(...toDiffLines(prev.slice(0, 4000), patch.new));
+                continue;
+            }
             if (!found) {
                 return {
                     ok: false,
                     type: 'edit_file',
                     path: relPath,
-                    error: `old không khớp trong ${relPath}. Đọc lại slice rồi copy old đúng từng ký tự.`,
+                    error: `old không khớp trong ${relPath}. Đừng dùng old từ lượt trước. Disk hiện tại:\n${this.similarSlice(text, patch.old)}`,
                 };
             }
             if (found.hits > 1 && !action.replace_all) {
@@ -289,7 +396,11 @@ class ToolManager {
     async writeFile(action) {
         const relPath = action.path;
         if (!relPath) return { ok: false, type: action.type, error: 'Missing path' };
-        if (action.old != null) return this.patchFile(action);
+        if (!this.pathExists(relPath) && (action.content != null || action.new != null)) {
+            action = { ...action, content: action.content != null ? action.content : action.new };
+        } else if (String(action.old || '') && this.pathExists(relPath)) {
+            return this.patchFile(action);
+        }
         let content = action.content;
         if (content == null) return { ok: false, type: action.type, path: relPath, error: 'Missing content' };
         if (String(content).trim() === '[object Object]') {
@@ -525,6 +636,44 @@ class ToolManager {
     async gitLog() {
         const log = await this.workspace.gitLog(this.root);
         return { ok: true, type: 'git_log', result: String(log || '(no log)').slice(0, MAX_OUT) };
+    }
+
+    async retrieve(action) {
+        const query = String(action.query || action.path || '').trim();
+        if (!query) return { ok: false, type: 'retrieve', error: 'Missing query' };
+        if (!this.retriever) return { ok: false, type: 'retrieve', error: 'Index chưa sẵn sàng' };
+        const found = this.retriever.retrieve(query, { k: 8 });
+        return {
+            ok: true,
+            type: 'retrieve',
+            query,
+            result: found.digest || '(no hits)',
+        };
+    }
+
+    async browserOpen(action) {
+        const url = String(action.url || action.path || action.query || '').trim();
+        if (!url) return { ok: false, type: 'browser_open', error: 'Missing url' };
+        if (!this.siteIndex || !this.controller) {
+            return { ok: false, type: 'browser_open', error: 'Chrome chưa mở — không crawl được website.' };
+        }
+        const captured = await this.siteIndex.capture(this.controller, url);
+        if (!captured.ok) return { ok: false, type: 'browser_open', error: captured.error };
+        return {
+            ok: true,
+            type: 'browser_open',
+            path: captured.path,
+            result: captured.digest,
+        };
+    }
+
+    async screenshot(action) {
+        const url = String(action.url || action.path || '').trim();
+        if (!this.siteIndex || !this.controller) {
+            return { ok: false, type: 'screenshot', error: 'Chrome chưa mở.' };
+        }
+        const shot = await this.siteIndex.screenshot(this.controller, url);
+        return { ...shot, type: 'screenshot' };
     }
 }
 

@@ -3,6 +3,9 @@ const ChatGptAgent = require('../chrome/ChatGptAgent');
 const DeepSeekAgent = require('../chrome/DeepSeekAgent');
 const AgentOrchestrator = require('./agent/AgentOrchestrator');
 const { resolveProvider } = require('./agent/providers');
+const ProjectIndexer = require('./agent/indexer/ProjectIndexer');
+const Retriever = require('./agent/retriever/Retriever');
+const SiteIndex = require('./agent/web/SiteIndex');
 
 function slimOpenFile(openFile) {
     if (!openFile?.path) return null;
@@ -28,11 +31,17 @@ class AgentRunner {
             deepseek: new DeepSeekAgent(),
         };
         this.providerId = 'gemini';
+        this.indexer = new ProjectIndexer(workspaceService);
+        this.retriever = new Retriever(this.indexer);
+        this.siteIndex = new SiteIndex(this.indexer);
         this.orchestrator = new AgentOrchestrator({
             workspaceService,
             gemini: this.agents.gemini,
             terminalService,
             onProgress: this.onProgress,
+            indexer: this.indexer,
+            retriever: this.retriever,
+            siteIndex: this.siteIndex,
         });
         this.busy = false;
         this.aborted = false;
@@ -100,6 +109,9 @@ class AgentRunner {
 
     setProjectRoot(root) {
         this.projectRoot = root || '';
+        if (this.projectRoot) {
+            this.indexer.ensure(this.projectRoot).catch(() => {});
+        }
     }
 
     setProvider(id) {
@@ -139,7 +151,7 @@ class AgentRunner {
                 geminiOpen: false,
                 provider: meta.id,
                 providerName: meta.name,
-                error: 'Profile đang Native nên không điều khiển được. Đóng rồi mở lại ở chế độ Consistent.',
+                error: `Chrome đã mở nhưng chưa kết nối được. Đóng rồi mở lại profile.`,
             };
         }
         try {
@@ -209,6 +221,7 @@ class AgentRunner {
                 openFile: slimOpenFile(openFile),
                 page,
                 memory: session,
+                controller,
             });
             this.rememberSession(session, result, userMessage);
             return { ...result, sessionId: session.id };

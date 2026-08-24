@@ -97,6 +97,7 @@ class TerminalService {
         this.seq = 0;
         this.sessionSeq = 0;
         this.log = '';
+        this.agentTermId = '';
     }
 
     nextSessionId() {
@@ -230,6 +231,7 @@ class TerminalService {
                 const closed = current?.proc === started.proc;
                 const stopped = current?.stopped;
                 if (closed) this.sessions.delete(sid);
+                if (this.agentTermId === sid && closed) this.agentTermId = '';
                 if (this.activeId === sid) {
                     this.activeId = [...this.sessions.keys()].at(-1) || '';
                 }
@@ -242,6 +244,7 @@ class TerminalService {
                 const closed = current?.proc === started.proc;
                 const stopped = current?.stopped;
                 if (closed) this.sessions.delete(sid);
+                if (this.agentTermId === sid && closed) this.agentTermId = '';
                 if (this.activeId === sid) {
                     this.activeId = [...this.sessions.keys()].at(-1) || '';
                 }
@@ -250,6 +253,78 @@ class TerminalService {
         }
         this.emit({ type: 'session-start', cwd: folder, source: 'session', sessionId: sid, title: session.title });
         return { ok: true, id: sid, title: session.title };
+    }
+
+    pickTerminal(cwd) {
+        if (this.agentTermId) {
+            if (this.sessions.get(this.agentTermId)?.proc) {
+                return { id: this.agentTermId, via: 'session' };
+            }
+            if (this.jobs.has(this.agentTermId)) {
+                return { id: this.agentTermId, via: 'job' };
+            }
+            this.agentTermId = '';
+        }
+        const active = this.getSession(this.activeId);
+        if (active?.proc) return { id: active.id, via: 'session' };
+        const sessions = [...this.sessions.values()].filter((item) => item.proc);
+        const sameCwd = sessions.find((item) => item.cwd === cwd);
+        if (sameCwd) return { id: sameCwd.id, via: 'session' };
+        if (sessions.length) return { id: sessions[sessions.length - 1].id, via: 'session' };
+        const jobs = [...this.jobs.values()];
+        if (jobs.length) return { id: jobs[jobs.length - 1].id, via: 'job' };
+        return null;
+    }
+
+    bindJob(sessionId, { cwd, command, source, mode }) {
+        const existing = this.jobs.get(sessionId);
+        if (existing) {
+            existing.command = command;
+            existing.cwd = cwd || existing.cwd;
+            existing.source = source || existing.source;
+            existing.mode = mode;
+            existing.reviewed = false;
+            return existing;
+        }
+        const job = {
+            id: sessionId,
+            command,
+            cwd,
+            source,
+            mode,
+            log: '',
+            child: null,
+            ready: false,
+            reviewed: false,
+        };
+        this.jobs.set(sessionId, job);
+        return job;
+    }
+
+    runningStartLog(sessionId) {
+        const job = this.jobs.get(sessionId);
+        if (job?.child && (job.ready || job.mode === 'start' || isStartCommand(job.command))) {
+            return stripAnsi(job.log || this.log).trim().slice(-MAX_AGENT);
+        }
+        const session = this.sessions.get(sessionId);
+        const tail = stripAnsi(session?.log || '').slice(-4000);
+        if (session?.proc && READY_RE.test(tail) && !this.looksIdle(tail)) {
+            return tail.slice(-MAX_AGENT);
+        }
+        return '';
+    }
+
+    looksIdle(text) {
+        const tail = stripAnsi(text).trim().split('\n').slice(-4).join('\n');
+        if (READY_RE.test(tail) && !/[$#%>]\s*$/.test(tail)) return false;
+        return /[$#%>]\s*$/.test(tail) || !READY_RE.test(tail);
+    }
+
+    isIdleSession(session) {
+        if (!session?.proc) return false;
+        const job = this.jobs.get(session.id);
+        if (job?.child) return false;
+        return this.looksIdle(session.log || '');
     }
 
     openJob({ cwd, command, source = 'agent', mode = 'wait' } = {}) {
@@ -314,20 +389,23 @@ class TerminalService {
             this.watchJob(job, { closed: true, reason });
         }
         this.jobs.delete(id);
+        if (this.agentTermId === id) this.agentTermId = '';
         if (this.activeId === id) this.activeId = [...this.sessions.keys()].at(-1) || [...this.jobs.keys()].at(-1) || '';
         return { ok: true, id };
     }
 
     stopSession(id) {
         const sid = id || this.activeId;
-        if (this.jobs.has(sid)) return this.closeJob(sid, 'close');
         const session = this.sessions.get(sid);
+        if (this.jobs.has(sid) && !session) return this.closeJob(sid, 'close');
+        if (this.jobs.has(sid)) this.closeJob(sid, 'close');
         if (!session) return { ok: true, id: sid };
         session.stopped = true;
         try { session.proc?.kill(); } catch { /* ignore */ }
         this.sessions.delete(sid);
+        if (this.agentTermId === sid) this.agentTermId = '';
         if (this.activeId === sid) {
-            this.activeId = [...this.sessions.keys()].at(-1) || '';
+            this.activeId = [...this.sessions.keys()].at(-1) || [...this.jobs.keys()].at(-1) || '';
         }
         return { ok: true, id: sid };
     }
@@ -418,13 +496,171 @@ class TerminalService {
         }
 
         const asBackground = background === true || (background !== false && isStartCommand(cmd));
-        const sessionId = source === 'agent'
-            ? this.openJob({ cwd, command: cmd, source, mode: asBackground ? 'start' : 'wait' })
-            : this.activeId;
+        let sessionId = this.activeId;
+        if (source === 'agent') {
+            const picked = this.pickTerminal(cwd);
+            if (picked) {
+                sessionId = picked.id;
+            } else {
+                sessionId = this.openJob({ cwd, command: cmd, source, mode: asBackground ? 'start' : 'wait' });
+            }
+            this.agentTermId = sessionId;
+            this.activeId = sessionId;
+            this.bindJob(sessionId, {
+                cwd,
+                command: cmd,
+                source,
+                mode: asBackground ? 'start' : 'wait',
+            });
+
+            const already = asBackground ? this.runningStartLog(sessionId) : '';
+            if (already) {
+                this.emit({ type: 'start', command: cmd, cwd, source, mode: 'start', sessionId });
+                this.emit({ type: 'ready', source, mode: 'start', sessionId });
+                return Promise.resolve({
+                    ok: true,
+                    type: 'run_start',
+                    command: cmd,
+                    running: true,
+                    result: `${already}\n(reused IDE terminal — server already running)`.slice(0, MAX_AGENT),
+                });
+            }
+
+            const session = this.getSession(sessionId);
+            if (session?.proc && this.isIdleSession(session)) {
+                return this.runInPty({
+                    cwd,
+                    command: cmd,
+                    source,
+                    sessionId,
+                    asBackground,
+                    settleMs,
+                });
+            }
+        }
+
         if (asBackground) {
             return this.runBackground({ cwd, command: cmd, source, settleMs, sessionId });
         }
         return this.runWait({ cwd, command: cmd, source, sessionId });
+    }
+
+    runInPty({ cwd, command: cmd, source, sessionId, asBackground, settleMs = START_SETTLE_MS }) {
+        const session = this.getSession(sessionId);
+        const job = this.jobs.get(sessionId);
+        if (!session?.proc) {
+            return asBackground
+                ? this.runBackground({ cwd, command: cmd, source, settleMs, sessionId })
+                : this.runWait({ cwd, command: cmd, source, sessionId });
+        }
+
+        const id = ++this.seq;
+        const startLen = (session.log || '').length;
+        const startedAt = Date.now();
+        this.emit({
+            type: 'start',
+            id,
+            command: cmd,
+            cwd,
+            source,
+            mode: asBackground ? 'start' : 'wait',
+            sessionId,
+        });
+        const payload = isWin ? `${cmd}\r\n` : `${cmd}\n`;
+        if (!this.writeToSession(payload, sessionId)) {
+            return asBackground
+                ? this.runBackground({ cwd, command: cmd, source, settleMs, sessionId })
+                : this.runWait({ cwd, command: cmd, source, sessionId });
+        }
+
+        return new Promise((resolve) => {
+            let finished = false;
+            let lastLen = startLen;
+            let lastChange = Date.now();
+            const outputOf = () => stripAnsi((session.log || '').slice(startLen));
+
+            const finish = (payload) => {
+                if (finished) return;
+                finished = true;
+                clearInterval(timer);
+                resolve(payload);
+            };
+
+            const markReady = () => {
+                if (job) job.ready = true;
+                this.emit({ type: 'ready', id, source, mode: 'start', sessionId });
+                finish({
+                    ok: true,
+                    type: 'run_start',
+                    command: cmd,
+                    running: true,
+                    result: `${(outputOf().trim() || '(no output yet)')}\n(server still running in IDE terminal)`.slice(0, MAX_AGENT),
+                });
+            };
+
+            const timer = setInterval(() => {
+                const nowLen = (session.log || '').length;
+                if (nowLen !== lastLen) {
+                    lastLen = nowLen;
+                    lastChange = Date.now();
+                    const output = outputOf();
+                    if (job) job.log = output.slice(-MAX_STORE);
+                    if (asBackground && READY_RE.test(output)) {
+                        setTimeout(markReady, 350);
+                    }
+                    if (job?.ready && logLooksBad(output.slice(-800))) {
+                        this.watchJob(job, { reason: 'error' });
+                    }
+                }
+                const output = outputOf();
+                if (!asBackground && output.trim() && Date.now() - lastChange > 1400 && Date.now() - startedAt > 500) {
+                    const bad = logLooksBad(output);
+                    this.emit({
+                        type: 'exit',
+                        id,
+                        code: bad ? 1 : 0,
+                        ok: !bad,
+                        source,
+                        mode: 'wait',
+                        sessionId,
+                    });
+                    finish({
+                        ok: !bad,
+                        type: 'run_command',
+                        command: cmd,
+                        running: false,
+                        result: (output.trim() || '(no output)').slice(0, MAX_AGENT),
+                    });
+                }
+            }, 160);
+
+            if (asBackground) {
+                setTimeout(() => {
+                    if (!finished) markReady();
+                }, settleMs);
+            } else {
+                setTimeout(() => {
+                    if (finished) return;
+                    const output = outputOf();
+                    this.emit({
+                        type: 'exit',
+                        id,
+                        code: 0,
+                        ok: true,
+                        source,
+                        mode: 'wait',
+                        sessionId,
+                    });
+                    finish({
+                        ok: !logLooksBad(output),
+                        type: 'run_command',
+                        command: cmd,
+                        running: false,
+                        result: (output.trim() || '(timeout)').slice(0, MAX_AGENT),
+                    });
+                }, WAIT_TIMEOUT_MS);
+            }
+        });
     }
 
     spawnShell(cwd, cmd) {

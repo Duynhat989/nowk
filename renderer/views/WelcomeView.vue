@@ -2,36 +2,43 @@
   <section class="welcome-page">
     <div class="welcome-card">
       <div class="welcome-brand">
-        <div class="welcome-mark">N</div>
-        <div>
-          <h1>{{ t('welcome.title') }}</h1>
-          <p>{{ t('welcome.slogan') }}</p>
-        </div>
+        <img class="welcome-mark" src="../assets/icon.png" alt="NowK" width="44" height="44">
+        <h1>NOWK</h1>
       </div>
+      <p class="welcome-links">
+        <button type="button" @click="createOpen = true">{{ t('welcome.newProject') }}</button>
+        <span>·</span>
+        <button type="button" class="link" @click="$emit('settings')">{{ t('ide.settings') }}</button>
+      </p>
 
-      <label class="welcome-search">
-        <svg viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.2"/><path d="M10.5 10.5L14 14"/></svg>
-        <input
-          v-model="query"
-          type="search"
-          :placeholder="t('welcome.search')"
-          autofocus
-        />
-      </label>
+      <div class="welcome-grid">
+        <button type="button" class="welcome-tile" @click="$emit('pick')">
+          <svg viewBox="0 0 24 24"><path d="M4 7h6l2 2h8v10H4z"/><path d="M4 7V5h7"/></svg>
+          <span>{{ t('welcome.openProject') }}</span>
+        </button>
+        <button type="button" class="welcome-tile" @click="cloneOpen = true">
+          <svg viewBox="0 0 24 24"><path d="M12 4v12"/><path d="M8 12l4 4 4-4"/><path d="M5 19h14"/></svg>
+          <span>{{ t('welcome.cloneRepo') }}</span>
+        </button>
+      </div>
 
       <div class="welcome-list-head">
         <strong>{{ t('welcome.recent') }}</strong>
-        <span>{{ filtered.length }}</span>
+        <button
+          v-if="recents.length > previewCount"
+          type="button"
+          class="welcome-viewall"
+          @click="showAll = !showAll"
+        >
+          {{ showAll ? t('welcome.viewLess') : t('welcome.viewAll', { n: recents.length }) }}
+        </button>
       </div>
 
-      <ul v-if="filtered.length" class="welcome-list">
-        <li v-for="item in filtered" :key="item.path">
+      <ul v-if="visible.length" class="welcome-list">
+        <li v-for="item in visible" :key="item.path">
           <button type="button" class="welcome-item" @click="$emit('open', item)">
-            <span class="welcome-item-icon">{{ item.missing ? '!' : '⌘' }}</span>
-            <span class="welcome-item-text">
-              <strong>{{ item.name }}</strong>
-              <small :class="{ missing: item.missing }">{{ item.path }}</small>
-            </span>
+            <strong>{{ item.name }}</strong>
+            <small :class="{ missing: item.missing }">{{ shortPath(item.path) }}</small>
           </button>
           <button
             type="button"
@@ -41,35 +48,57 @@
           >×</button>
         </li>
       </ul>
-      <p v-else class="welcome-empty">{{ query.trim() ? t('welcome.noMatch') : t('welcome.empty') }}</p>
-
-      <button type="button" class="btn btn-primary welcome-open" @click="$emit('pick')">
-        {{ t('welcome.openFolder') }}
-      </button>
+      <p v-else class="welcome-empty">{{ t('welcome.empty') }}</p>
     </div>
+
+    <NewProjectModal
+      v-if="createOpen"
+      @close="createOpen = false"
+      @created="onCreated"
+    />
+    <CloneRepoModal
+      v-if="cloneOpen"
+      @close="cloneOpen = false"
+      @created="onCloned"
+    />
   </section>
 </template>
 
 <script setup>
 import { computed, ref } from 'vue';
 import { useI18n } from 'vue-i18n';
+import NewProjectModal from '../components/NewProjectModal.vue';
+import CloneRepoModal from '../components/CloneRepoModal.vue';
 
 const props = defineProps({
   recents: { type: Array, default: () => [] },
 });
 
-defineEmits(['open', 'pick', 'remove']);
+const emit = defineEmits(['open', 'pick', 'remove', 'created', 'settings']);
 
 const { t } = useI18n();
-const query = ref('');
+const createOpen = ref(false);
+const cloneOpen = ref(false);
+const showAll = ref(false);
+const previewCount = 6;
 
-const filtered = computed(() => {
-  const q = query.value.trim().toLowerCase();
+const visible = computed(() => {
   const list = props.recents || [];
-  if (!q) return list;
-  return list.filter((item) => (
-    String(item.name || '').toLowerCase().includes(q)
-    || String(item.path || '').toLowerCase().includes(q)
-  ));
+  return showAll.value ? list : list.slice(0, previewCount);
 });
+
+function shortPath(value) {
+  const raw = String(value || '').replace(/\\/g, '/');
+  return raw.replace(/^\/Users\/[^/]+/, '~').replace(/^\/home\/[^/]+/, '~');
+}
+
+function onCreated(result) {
+  createOpen.value = false;
+  emit('created', result);
+}
+
+function onCloned(result) {
+  cloneOpen.value = false;
+  emit('created', result);
+}
 </script>

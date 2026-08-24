@@ -4,37 +4,56 @@ const ToolManager = require('./ToolManager');
 const GeminiWebAdapter = require('./GeminiWebAdapter');
 const { parseResponse, looksTruncated, looksLikeRefusal } = require('./ResponseParser');
 const { compressState } = require('./ContextCompressor');
-const { verifyChanges, formatReport, auditAction, collectNeedles, sweepLeftovers, formatSweep } = require('./ChangeVerifier');
+const { verifyChanges, formatReport, auditAction } = require('./ChangeVerifier');
+const { extractUrls } = require('./web/SiteIndex');
+const { checkWiring, formatWiring } = require('./WiringCheck');
+const { checkBehavior, formatBehavior, wantsControl } = require('./BehaviorCheck');
+const { splitRequirements, parseAiPlan, planPrompt, formatRequirements, kindProgress, formatKindBlock, kindMeta } = require('./Requirements');
+const { toDiffLines, fileAddedLines } = require('./diffHunk');
 
 const MAX_ITERS = 20;
 const WRITE_TOOLS = new Set(['mkdir', 'create_file', 'edit_file', 'delete_file', 'run_command', 'run_test', 'run_build', 'run_start', 'run_stop']);
-const READ_TOOLS = new Set(['list_files', 'read_file', 'search_code', 'find_symbol', 'find_references', 'git_status', 'git_diff', 'git_log']);
+const READ_TOOLS = new Set(['list_files', 'read_file', 'search_code', 'find_symbol', 'find_references', 'git_status', 'git_diff', 'git_log', 'retrieve', 'browser_open', 'screenshot']);
 const RUN_TOOLS = new Set(['run_command', 'run_test', 'run_build', 'run_start']);
 
-const PROTOCOL = `You are NowK, a coding agent inside the user's IDE (same job as Cursor Agent).
-You call tools by returning ONE JSON object. NowK executes it on the real project. This is not a simulation.
+const PROTOCOL = `You are NowK, a coding agent (Cursor-style). NowK already indexed the repo into a vector store and retrieved the relevant slices below.
+You call tools by returning ONE JSON object. NowK executes it on the real project.
 
-{"analysis":"one short sentence","plan":["file — change"],"actions":[{"type":"read_file","path":"src/App.vue"},{"type":"edit_file","path":"src/App.vue","old":"...","new":"..."}],"done":false}
+{"analysis":"one short sentence","plan":["file — change"],"actions":[{"type":"read_file","path":"src/App.vue","start":1,"end":80}],"done":false}
 
-actions items MUST have "type". Wrong: {"read_file":{"path":"src/style.css"}}. Right: {"type":"read_file","path":"src/style.css"}.
+actions items MUST have "type".
 
 Tools:
-read_file {path, query?} | search_code {query} | list_files {path?}
+retrieve {query} | read_file {path, start?, end?} | search_code {query} | grep {query}
 edit_file {path, old, new} | create_file {path, content} | delete_file {path} | mkdir {path}
 run_command {command} | run_start {command} | run_test {command}
+browser_open {url} | screenshot {url?}
 
-How you work (Cursor-style):
-- The PROJECT MAP is already in context. Do not re-list the whole repo.
-- Mix reads and edits in the same turn. Start editing as soon as you know the hunk.
-- Batch 3–8 tools. Follow wiring: App/layout → pages → components → css.
-- edit_file: copy old EXACTLY from the numbered lines. new must be valid code.
-- Do NOT re-read a file already in TOOL RESULTS. Next JSON must include edit_file.
-- Plan steps are edits ("file — change"), never "read lines 100-140".
-- A UI/content change is not done after one CSS file or :root tokens.
-- done=true only when the user-visible task is finished and the planned files were edited.
-- Never say you lack tools. Never repeat a long plan as the final answer.`;
+Loop: split ALL user requirements → classify each (feature/bugfix/update/...) → follow THAT kind's playbook → next requirement → done only after the last.
+- Count every ask. Do not drop any. Do not treat them all the same.
+- FEATURE: survey RELATION TREE first (who owns state, who renders, who writes), then implement on that tree. Never duplicate state.
+- BUGFIX: locate + name the root cause, read callers, THEN fix the cause. No blind patches.
+- UPDATE: find the current implementation, patch in place, sync connected surfaces.
+- done=true ONLY when every requirement's playbook is finished. Never stop after the first ask.
+- Use RETRIEVED CONTEXT first. Do not list the whole project.
+- A button/menu/control is NOT done until it works. Never add a dead label.
+- Electron: copy existing ipcMain.handle + contextBridge.exposeInMainWorld. Renderer @click must invoke a channel. Dev Tools = webContents.openDevTools() in main, not just a <button>.
+- A popup/page is incomplete if the main UI still uses a different array/ref/store. NEVER duplicate state.
+- If CONNECTED SURFACES lists several files, read them and wire them together before done=true.
+- Do not edit package.json/README to mark done. No fake finalize steps.
+- If a tool returns an error (missing file, old mismatch, audit fail): FIX it now. create_file if the path does not exist. Never done=true while errors remain.
+- STYLE/restyle of "all UI": edit every Vue/CSS in RELATION TREE. One extra theme file is not enough.
+- edit_file: copy old EXACTLY from numbered lines. Do not redeclare the same identifier.
+- When the request actually works (UI + behavior + shared data): actions=[] done=true.
+- Never say you lack tools.`;
 
 const TURN = `Return only that JSON. Escape quotes as \\".`;
+
+const STOP_NEEDLE = new Set([
+    'please', 'this', 'that', 'with', 'from', 'file', 'code', 'project', 'build',
+    'chạy', 'chương', 'trình', 'giúp', 'dùng', 'thử', 'thêm', 'sửa', 'tạo',
+    'cho', 'tôi', 'các', 'một', 'này', 'làm', 'được', 'muốn', 'phần', 'hoạt',
+]);
 
 function wantsFileWork(message) {
     return /tạo|xóa|sửa|thêm|file|thư mục|folder|mkdir|write|delete|fix|refactor|implement|viết|nội dung|giao diện|thay đổi|đổi/i.test(message);
@@ -60,13 +79,93 @@ function planFiles(item) {
 function uncoveredPlan(state) {
     return (state.plan || []).filter((item) => {
         if (item.status === 'completed') return false;
+        if (state.isFillerPlan?.(item) || state.isRunPlan?.(item)) return false;
         if (state.isReadOnlyPlan?.(item)) return false;
         const files = planFiles(item);
-        if (!files.length) return true;
+        if (!files.length) return false;
         return !files.some((file) => (state.filesChanged || []).some((rel) => (
             rel === file || rel.endsWith(`/${file}`) || rel.endsWith(file)
         )));
     });
+}
+
+function packageEditAllowed(task, action) {
+    if (/package\.json|dependenc|devDependenc|npm install|\bnpm i\b|thêm thư viện|cài package/i.test(task)) {
+        return true;
+    }
+    const old = String(action.old || '');
+    const neu = String(action.new || action.content || '');
+    const stripMeta = (text) => String(text).replace(
+        /"(name|description|author|homepage|version|productName)"\s*:\s*("[^"]*"|[^,}\n]+)/g,
+        '',
+    );
+    if (old && stripMeta(old) !== stripMeta(neu)) {
+        return /"(dependencies|devDependencies|scripts|main|exports|bin)"/.test(neu);
+    }
+    return false;
+}
+
+function skipWriteReason(task, action) {
+    const rel = String(action.path || '');
+    if (!rel) return '';
+    if (/(^|\/)README(\.\w+)?$/i.test(rel) && !/readme|docs|hướng dẫn|tài liệu|changelog/i.test(task)) {
+        return `SKIP ${rel}: task không yêu cầu sửa tài liệu. Không dùng README để đánh dấu xong.`;
+    }
+    if (/(^|\/)LICENSE$/i.test(rel) && !/license/i.test(task)) {
+        return `SKIP ${rel}: task không yêu cầu sửa license.`;
+    }
+    if (/(^|\/)package\.json$/i.test(rel) && !packageEditAllowed(task, action)) {
+        return 'SKIP package.json: không sửa name/description/author/homepage để đánh dấu xong.';
+    }
+    return '';
+}
+
+function relatedSurfaces(state) {
+    return (state.relevantFiles || []).filter((rel) => /\.(vue|jsx|tsx|js|ts|html)$/i.test(rel));
+}
+
+function behaviorLeft(state, task) {
+    if (!wantsControl(task)) return false;
+    if (state.behaviorFail) return true;
+    const changed = state.filesChanged || [];
+    if (!changed.length) return true;
+    if (changed.every((rel) => /\.(css|scss|less|html)$/i.test(rel))) return true;
+    const related = relatedSurfaces(state);
+    const bridge = related.filter((rel) => /preload\.(js|ts)$|(^|\/)(main|index)\.(js|ts)$|ipc/i.test(rel));
+    if (bridge.length && /electron|devtools|dev tools|ipc/i.test(task)) {
+        const touched = changed.some((rel) => (
+            bridge.includes(rel) || /preload\.(js|ts)$|(^|\/)(main|index)\.(js|ts)$/i.test(rel)
+        ));
+        if (!touched) return true;
+    }
+    return false;
+}
+
+function wiringLeft(state, task) {
+    if (!wantsFileWork(task)) return false;
+    if (state.wiringFail || state.behaviorFail) return true;
+    if (behaviorLeft(state, task)) return true;
+    const related = relatedSurfaces(state);
+    if (related.length < 2) return false;
+    const changed = state.filesChanged || [];
+    const read = state.filesRead || [];
+    if (!changed.length) return true;
+    const seen = related.filter((rel) => read.includes(rel) || changed.includes(rel));
+    if (seen.length < Math.min(2, related.length)) return true;
+    const touchedExisting = changed.some((rel) => related.includes(rel));
+    if (!touchedExisting) return true;
+    return false;
+}
+
+function taskSatisfied(state, task) {
+    if ((state.truncated || []).length) return false;
+    if ((state.currentErrors || []).length || state.batchFailed) return false;
+    if (wantsVerify(task) && !wantsFileWork(task)) return hasRun(state);
+    if (wantsFileWork(task) && !(state.filesChanged || []).length) return false;
+    if (wiringLeft(state, task) || behaviorLeft(state, task)) return false;
+    if ((state.requirements || []).length && state.reqIndex < state.requirements.length) return false;
+    if (isBroadChange(task) && (state.filesChanged || []).length <= 1) return false;
+    return true;
 }
 
 function extractLineRange(text, path) {
@@ -116,11 +215,16 @@ function dropDuplicateReads(actions, state) {
 }
 
 function workLeft(state, task) {
-    if (uncoveredPlan(state).length) return true;
-    const changed = state.filesChanged || [];
-    if (isBroadChange(task) && changed.length <= 1) return true;
-    if (isBroadChange(task) && changed.length === 1 && /\.css$/i.test(changed[0])) return true;
-    if (isBroadChange(task) && (state.uiCount || 0) >= 4 && changed.length < 3) return true;
+    if ((state.truncated || []).length) return true;
+    if ((state.currentErrors || []).length || state.batchFailed) return true;
+    if ((state.requirements || []).length && state.reqIndex < state.requirements.length) return true;
+    if (wantsVerify(task) && !wantsFileWork(task)) return !hasRun(state);
+    if (wantsFileWork(task) && !(state.filesChanged || []).length) return true;
+    if (wiringLeft(state, task)) return true;
+    if (isBroadChange(task) && (state.filesChanged || []).length <= 1) return true;
+    if (isBroadChange(task) && (state.uiCount || 0) >= 4 && (state.filesChanged || []).length < 3) return true;
+    const progress = kindProgress(state);
+    if (!progress.ok && progress.reason === 'implement') return true;
     return false;
 }
 
@@ -142,18 +246,53 @@ function lastIndexOfRe(text, re) {
     return last;
 }
 
+function lastTimeSlice(log) {
+    const text = String(log || '');
+    const re = /(\d{1,2}:\d{2}:\d{2}(?:\s*[AP]M)?)/gi;
+    const hits = [];
+    let match = re.exec(text);
+    while (match) {
+        hits.push({ stamp: match[1].replace(/\s+/g, ' ').trim(), at: match.index });
+        match = re.exec(text);
+    }
+    if (!hits.length) return { stamp: '', slice: text };
+    const stamp = hits[hits.length - 1].stamp;
+    const start = hits.find((item) => item.stamp.toLowerCase() === stamp.toLowerCase())?.at ?? hits[hits.length - 1].at;
+    return { stamp, slice: text.slice(start) };
+}
+
+function sliceLooksFailed(slice) {
+    return /internal server error|failed to compile|failed to (resolve|load)|cannot find module|module not found|syntaxerror|typeerror|referenceerror|uncaught|traceback \(most recent|plugin:\s*vite:vue|error when starting|tags with side effect|unexpected token/i
+        .test(slice);
+}
+
+function sliceLooksHealthy(slice) {
+    return /hmr update|page reload|\[vite\].*connected|ready in\b|compiled successfully|dev server running|listening on|✓ built|watching for file changes|0 error/i
+        .test(slice);
+}
+
 function terminalProblems(text) {
     const clean = String(text || '').replace(/\u001b\[[0-9;]*[A-Za-z]/g, '').trim();
-    if (!clean) return { empty: true, ok: true, text: '' };
-    const tail = clean.slice(-6000);
+    if (!clean) return { empty: true, ok: true, text: '', stamp: '' };
+    const tail = clean.slice(-8000);
+    const { stamp, slice } = lastTimeSlice(tail);
+    if (stamp) {
+        const failed = sliceLooksFailed(slice);
+        const healthy = sliceLooksHealthy(slice);
+        return {
+            empty: false,
+            ok: healthy && !failed,
+            stamp,
+            text: slice.slice(0, 2500),
+        };
+    }
     const errAt = Math.max(
-        lastIndexOfRe(tail, /\berror\b/i),
+        lastIndexOfRe(tail, /internal server error/i),
         lastIndexOfRe(tail, /failed to (compile|resolve|load)/i),
-        lastIndexOfRe(tail, /cannot find module/i),
-        lastIndexOfRe(tail, /module not found/i),
+        lastIndexOfRe(tail, /cannot find module|module not found/i),
         lastIndexOfRe(tail, /syntaxerror|typeerror|referenceerror/i),
         lastIndexOfRe(tail, /traceback \(most recent/i),
-        lastIndexOfRe(tail, /internal server error/i),
+        lastIndexOfRe(tail, /tags with side effect/i),
     );
     const okAt = Math.max(
         lastIndexOfRe(tail, /compiled successfully/i),
@@ -161,9 +300,10 @@ function terminalProblems(text) {
         lastIndexOfRe(tail, /listening on/i),
         lastIndexOfRe(tail, /dev server running/i),
         lastIndexOfRe(tail, /✓ built/i),
+        lastIndexOfRe(tail, /hmr update/i),
         lastIndexOfRe(tail, /0 error/i),
     );
-    return { empty: false, ok: errAt < 0 || errAt < okAt, text: tail };
+    return { empty: false, ok: errAt < 0 || errAt < okAt, stamp: '', text: tail };
 }
 
 function inferSimple(message) {
@@ -228,7 +368,7 @@ function parseListedPaths(results) {
 }
 
 const PRIORITY_FILES = [
-    'package.json', 'index.html', 'README.md', 'pyproject.toml', 'requirements.txt',
+    'package.json', 'index.html', 'pyproject.toml', 'requirements.txt',
     'src/App.vue', 'src/App.jsx', 'src/App.tsx', 'src/main.js', 'src/main.ts',
     'src/main.py', 'src/index.css', 'src/style.css', 'src/App.css',
     'src/router/index.js', 'src/router/index.ts',
@@ -259,10 +399,12 @@ function buildSurveyReads(listed, task, relevant, uiSurfaces) {
         if (path) add({ type: 'list_files', path });
     }
     for (const file of PRIORITY_FILES) {
+        if (/^README/i.test(file) && !/readme|docs|hướng dẫn|tài liệu/i.test(task)) continue;
         const path = resolve(file);
         if (path) add({ type: 'read_file', path });
     }
-    for (const path of (uiSurfaces || []).slice(0, 8)) {
+    const surfaceLimit = isBroadChange(task) ? 8 : 3;
+    for (const path of (uiSurfaces || []).slice(0, surfaceLimit)) {
         if (/\.(vue|html|css|js|ts|json)$/i.test(path)) add({ type: 'read_file', path });
     }
     for (const path of (relevant || []).slice(0, 5)) {
@@ -271,8 +413,8 @@ function buildSurveyReads(listed, task, relevant, uiSurfaces) {
     const needles = String(task || '')
         .split(/[^A-Za-z0-9À-ỹ_-]+/)
         .map((word) => word.trim())
-        .filter((word) => word.length >= 4)
-        .slice(0, 6);
+        .filter((word) => word.length >= 5 && !STOP_NEEDLE.has(word.toLowerCase()))
+        .slice(0, 4);
     for (const query of needles) add({ type: 'search_code', query });
     if (isBroadChange(task)) {
         add({ type: 'search_code', query: 'title' });
@@ -281,14 +423,31 @@ function buildSurveyReads(listed, task, relevant, uiSurfaces) {
     return actions.slice(0, 16);
 }
 
+function previewLines(action) {
+    if (!action) return [];
+    if (Array.isArray(action.patches) && action.patches.length) {
+        return action.patches.flatMap((item) => toDiffLines(item.old, item.new));
+    }
+    const added = action.content != null ? action.content : action.new;
+    if (action.type === 'create_file' && added != null) return fileAddedLines(added);
+    if (action.type === 'edit_file') return toDiffLines(action.old, action.new);
+    if (action.type === 'delete_file' && action.old != null) {
+        return toDiffLines(action.old, '');
+    }
+    return [];
+}
+
 class AgentOrchestrator {
-    constructor({ workspaceService, gemini, terminalService, onProgress }) {
+    constructor({ workspaceService, gemini, terminalService, onProgress, indexer, retriever, siteIndex }) {
         this.workspace = workspaceService;
         this.context = new ProjectContext(workspaceService);
         this.gemini = gemini;
         this.llmName = 'Gemini';
         this.terminalService = terminalService;
         this.onProgress = onProgress;
+        this.indexer = indexer || null;
+        this.retriever = retriever || null;
+        this.siteIndex = siteIndex || null;
         this.aborted = false;
     }
 
@@ -323,6 +482,21 @@ class AgentOrchestrator {
     }
 
     emitPlan(state) {
+        if (state.requirements?.length) {
+            this.emit('plan', '', {
+                plan: state.requirements.map((item, idx) => ({
+                    task: item.text,
+                    kind: item.kind || 'feature',
+                    kindLabel: kindMeta(item.kind).label,
+                    status: idx < state.reqIndex
+                        ? 'completed'
+                        : idx === state.reqIndex
+                            ? 'in_progress'
+                            : 'pending',
+                })),
+            });
+            return;
+        }
         if (!state.plan?.length) return;
         this.emit('plan', '', {
             plan: state.plan.map((item) => ({ task: item.task, status: item.status || 'pending' })),
@@ -354,8 +528,93 @@ class AgentOrchestrator {
         return { ...parsed, actions: [suggested], done: false, claimedDone: false };
     }
 
+    buildNextRequirementPrompt(state, task) {
+        const current = state.currentRequirement();
+        const n = state.requirements.length;
+        const idx = state.reqIndex + 1;
+        const meta = kindMeta(current?.kind);
+        return `${PROTOCOL}
+
+${state.projectBrief || ''}
+
+FULL TASK (do every requirement, in order):
+${task}
+
+${formatRequirements(state.requirements, state.reqIndex)}
+
+${formatKindBlock(state)}
+
+Requirement ${idx}/${n} is a ${meta.labelEn} (${meta.label}). Follow the playbook above. Start with survey/diagnose — do not edit yet if PHASE NOW is survey or diagnose.
+done=false until ${n}/${n} is [done].
+${TURN}`;
+    }
+
+    buildKindPlaybookPrompt(state, task, progress) {
+        return `${PROTOCOL}
+
+TASK:
+${task}
+
+${formatKindBlock(state)}
+
+You skipped the playbook. PHASE is ${progress?.phase || 'survey'}.
+${progress?.hint || 'Survey/diagnose first.'}
+${progress?.reason === 'survey' || progress?.reason === 'diagnose'
+        ? 'Emit read_file / search_code / retrieve on RELATION TREE files now. Do not emit edit_file yet.'
+        : 'Emit the edit_file that follows the playbook on the files you already read.'}
+done=false.
+${TURN}`;
+    }
+
+    applyRetrieved(state, retrieved) {
+        state.relevantFiles = retrieved?.files || [];
+        state.uiCount = retrieved?.files?.length || 0;
+        state.projectBrief = retrieved?.digest || '';
+        state.relationTree = retrieved?.tree || '';
+        if (retrieved?.tree) {
+            this.emit('step', `Cây liên hệ:\n${String(retrieved.tree).slice(0, 800)}`);
+        }
+    }
+
+    shouldAdvanceRequirement(state, parsed, task, empty) {
+        if (!state.requirements?.length) return false;
+        if (state.reqIndex >= state.requirements.length) return false;
+        if (state.wiringFail || state.behaviorFail) return false;
+        if ((state.currentErrors || []).length || state.batchFailed) return false;
+        const req = state.currentRequirement();
+        if (req?.kind === 'run' && !hasRun(state)) return false;
+        const progress = kindProgress(state);
+        const modelDone = looksModelDone(parsed);
+        if (!progress.ok && (progress.reason === 'survey' || progress.reason === 'diagnose')) return false;
+        if (!progress.ok && (progress.reason === 'implement' || progress.reason === 'fix')) {
+            if (!(modelDone && empty >= 2)) return false;
+        }
+        const progressed = (state.filesChanged || []).length > state.reqMark;
+        const runOnly = req?.kind === 'run' || (wantsVerify(task) && !wantsFileWork(task) && hasRun(state));
+        if (progress.ok && (modelDone || empty >= 1)) return true;
+        if (progressed && (modelDone || empty >= 1)) return true;
+        if (runOnly && (modelDone || empty >= 1 || hasRun(state))) return true;
+        if (modelDone && empty >= 2 && state.requirements.length > 1 && progress.ok) return true;
+        return false;
+    }
+
+    refreshRetrieved(state, query, openFile) {
+        if (!this.retriever) return;
+        const retrieved = this.retriever.retrieve(query, {
+            openFile,
+            k: 10,
+            extra: [state.surveyDigest],
+        });
+        this.applyRetrieved(state, retrieved);
+    }
+
     remainingPlanText(state) {
-        const pending = state.pendingPlan();
+        if (state.requirements?.length) {
+            return formatRequirements(state.requirements, state.reqIndex);
+        }
+        const pending = state.pendingPlan().filter((item) => (
+            !state.isFillerPlan?.(item) && !state.isRunPlan?.(item) && !state.isReadOnlyPlan?.(item)
+        ));
         if (!pending.length) return '';
         return pending.map((item, idx) => `${idx + 1}. ${item.task}`).join('\n');
     }
@@ -366,17 +625,24 @@ class AgentOrchestrator {
     }
 
     async bootstrapSurvey(tools, state, task, relevant, uiSurfaces) {
-        await this.emitWorking({ type: 'list_files' }, 'Đang đọc dự án để nắm hiện trạng...');
-        this.emit('status', 'Đang đọc dự án để nắm hiện trạng...');
+        const runOnly = wantsVerify(task) && !wantsFileWork(task);
+        await this.emitWorking({ type: 'list_files' }, runOnly
+            ? 'Đang xem cách chạy dự án...'
+            : 'Đang đọc dự án để nắm hiện trạng...');
+        this.emit('status', runOnly ? 'Đang xem cách chạy dự án...' : 'Đang đọc dự án để nắm hiện trạng...');
         state.markPhase('survey');
         const first = [
             { type: 'list_files', path: '' },
-            { type: 'list_files', path: 'src' },
+            ...(runOnly ? [] : [{ type: 'list_files', path: 'src' }]),
             { type: 'git_status' },
         ];
         const listed = await this.executeActions(tools, first, state, { quiet: true });
         this.appendSurvey(state, listed.results);
-        const more = buildSurveyReads(parseListedPaths(listed.results), task, relevant, uiSurfaces);
+        const more = runOnly
+            ? buildSurveyReads(parseListedPaths(listed.results), task, [], [])
+                .filter((item) => item.type === 'read_file' && /package\.json$/i.test(item.path))
+                .slice(0, 1)
+            : buildSurveyReads(parseListedPaths(listed.results), task, relevant, uiSurfaces);
         if (more.length) {
             await this.emitWorking({ type: 'read_file' }, `Đang đọc ${more.length} file then chốt...`);
             this.emit('status', `Đang đọc ${more.length} file then chốt...`);
@@ -507,7 +773,7 @@ ${task}
 Current plan is TOO THIN:
 ${have}
 
-Expand the plan to 6–16 concrete steps from what you already read. Name real files. Cover leftover pages, components, CSS, i18n, footer, title.
+Cover leftover files that THIS task still needs. Do not add README/package.json finalize steps.
 Also emit more search_code / list_files / read_file now if a step is still ungrounded. done=false.
 ${TURN}`;
     }
@@ -542,7 +808,7 @@ ${String(state.projectBrief || '').slice(0, 2500) || '(see earlier map)'}
 PLAN (execute along the chain, parent then child):
 ${plan}
 
-Emit several connected edit_file / create_file in this JSON. Do not finish after one isolated file.
+Emit the edit_file / create_file this TASK still needs in this JSON. Do not touch unrelated files.
 ${TURN}`;
     }
 
@@ -560,7 +826,7 @@ Continue TASK:
 ${task}
 
 ${hint}
-JSON only. Copy old from disk. Edit the remaining files now. done=false until those files are changed.`;
+JSON only. Copy old from disk. If the request is already done, actions=[] done=true. Do not edit unrelated files.`;
     }
 
     ingest(state, raw) {
@@ -583,17 +849,15 @@ JSON only. Copy old from disk. Edit the remaining files now. done=false until th
 
     isComplete(parsed, state, task) {
         if (parsed.refusal) return false;
-        if (state.currentPhase === 'survey') return false;
+        if (state.currentPhase === 'survey' || state.currentPhase === 'index') return false;
         if (state.currentPhase === 'plan' && !looksModelDone(parsed)) return false;
         if (parsed.actions.length) return false;
         if (state.awaitingFollowUp) return false;
-        if (state.oldNeedles.length && !state.sweepOk) return false;
         if (workLeft(state, task)) return false;
         if (looksModelDone(parsed)) return true;
+        if (!parsed.actions.length && !workLeft(state, task)) return true;
         if (wantsFileWork(task) && !state.filesChanged.length) return false;
-        if (wantsFileWork(task) && !state.proofed) return false;
         if (wantsVerify(task) && !hasRun(state)) return false;
-        if (state.pendingPlan().length) return false;
         if (isBroadChange(task) && (state.uiCount || 0) >= 3 && state.filesChanged.length < 2) return false;
         return false;
     }
@@ -618,17 +882,41 @@ ${TURN}`;
     buildKeepWorkingPrompt(state, task) {
         const leftover = uncoveredPlan(state).map((item, idx) => `${idx + 1}. ${item.task}`).join('\n');
         const changed = (state.filesChanged || []).join(', ') || '(none)';
+        const current = state.currentRequirement();
+        const reqHint = state.requirements.length && current
+            ? `\n${formatKindBlock(state)}\nYou are on requirement ${state.reqIndex + 1}/${state.requirements.length} [${kindMeta(current.kind).label}]: ${current.text}\n`
+            : '';
+        return `${PROTOCOL}
+
+TASK:
+${task}
+${reqHint}
+You only changed: ${changed}
+That is not enough. These plan steps still have untouched files:
+${leftover || this.remainingPlanText(state) || '(more views/components still old)'}
+
+Emit the remaining edit_file / create_file NOW for THIS task only.
+Do not rewrite the plan. Do not edit package.json/README to mark done. done=false.
+Do not emit read_file for files already in context.
+${TURN}`;
+    }
+
+    buildFixErrorsPrompt(state, task) {
+        const errors = (state.currentErrors || []).slice(-6).map((item, idx) => `${idx + 1}. ${item}`).join('\n');
         return `${PROTOCOL}
 
 TASK:
 ${task}
 
-You only changed: ${changed}
-That is not enough. These plan steps still have untouched files:
-${leftover || this.remainingPlanText(state) || '(more views/components still old)'}
+${formatKindBlock(state)}
 
-Emit 3–8 edit_file / create_file NOW for those files. Copy old from the file map.
-Do not rewrite the plan. Do not say complete. done=false.
+A tool just FAILED. Do not mark the requirement done. Do not stop.
+
+ERRORS:
+${errors || '(see last tool result)'}
+
+Fix the error: if the file is missing, emit create_file with FULL content. If old did not match, read_file then edit_file with exact old.
+Then continue remaining files on RELATION TREE. done=false.
 ${TURN}`;
     }
 
@@ -662,11 +950,15 @@ ${TURN}`;
         }
 
         if (report.ok) {
-            this.emit('step', 'Terminal không báo lỗi — dừng.');
+            this.emit('step', report.stamp
+                ? `Terminal mốc cuối ${report.stamp} không lỗi — dừng.`
+                : 'Terminal không báo lỗi — dừng.');
             return { ...parsed, actions: [], done: true, claimedDone: true };
         }
 
-        this.emit('status', 'Terminal có lỗi — sửa ngay...');
+        this.emit('status', report.stamp
+            ? `Terminal mốc cuối ${report.stamp} có lỗi — sửa ngay...`
+            : 'Terminal có lỗi — sửa ngay...');
         const raw = await send(this.buildTerminalFixPrompt(state, task, report.text));
         const next = this.ingest(state, raw);
         next.refusal = false;
@@ -699,16 +991,12 @@ ${TURN}`;
         const failedRuns = results.filter((item) => RUN_TOOLS.has(item.type) && !item.ok);
         const leftover = this.remainingPlanText(state);
         let extra = leftover
-            ? `\nNOT DONE. These plan files are still untouched. Emit 3–8 edit_file now:\n${leftover}\ndone=false.`
-            : '\nIf any connected page/component still looks old, patch it now. Only done=true after those files are edited.';
+            ? `\nStill missing for THIS task. Edit only these:\n${leftover}\ndone=false.`
+            : '\nIf THIS user request is done, return actions=[] done=true. Do not patch extra files or package.json/README.';
         if (missing.length) {
-            extra = `\nNOT FINISHED. For new files use create_file. For existing files use edit_file old/new (snippet only):\n${missing.join('\n')}\ndone=false.`;
+            extra = `\nNOT FINISHED. For new files use create_file. For existing files use edit_file old/new:\n${missing.join('\n')}\ndone=false.`;
         } else if (failedRuns.length) {
             extra = '\nCOMMAND FAILED. Read the terminal output, fix files, then run_command / run_test / run_start again. done=false.';
-        } else if (state.filesChanged.length && !state.proofed) {
-            extra = `\n${state.lastProof || 'DISK CHECK: FAIL'}\nDo not claim the CSS/code was added. Patch the missing bits. done=false.`;
-        } else if (state.oldNeedles.length && !state.sweepOk) {
-            extra = `\n${state.lastSweep || 'SWEEP FAIL'}\nOld text still exists elsewhere. Patch those files too. done=false.`;
         } else if (wantsVerify(state.task) && !hasRun(state)) {
             extra = '\nYou have not used the IDE terminal yet. Emit run_command, run_test, or run_start now to verify or launch. done=false.';
         }
@@ -728,17 +1016,54 @@ ${TURN}`;
         for (const action of actions) {
             this.throwIfAborted();
             await this.emitWorking(action);
-            this.emit('tool', action.path || action.command || action.query || action.type, {
-                tool: action.type,
-                path: action.path || '',
-                command: action.command || '',
-                query: action.query || '',
-                start: action.start || action.from || '',
-                end: action.end || action.to || '',
-            });
             await this.pump();
+            const skip = /create_file|edit_file|delete_file/.test(action.type)
+                ? skipWriteReason(state.task, action)
+                : '';
+            if (skip) {
+                results.push({
+                    ok: false,
+                    type: action.type,
+                    path: action.path,
+                    changed: false,
+                    error: skip,
+                    result: skip,
+                });
+                state.recordTool(action.type, action.path || '');
+                this.emit('tool', action.path || action.type, {
+                    tool: action.type,
+                    path: action.path || '',
+                    ok: false,
+                    error: skip,
+                    lines: [],
+                });
+                this.emit('audit', skip, { ok: false, path: action.path || '', tool: action.type });
+                continue;
+            }
             let result = await tools.run(action);
-            if (result.ok && /create_file|edit_file|mkdir|delete_file/.test(action.type)) {
+            if (!result.ok && action.type === 'edit_file' && /Không tìm thấy file/i.test(String(result.error || ''))) {
+                const content = action.content != null ? action.content : action.new;
+                if (content != null && String(content).trim()) {
+                    this.emit('step', `File chưa có — tạo ${action.path}`);
+                    result = await tools.run({
+                        type: 'create_file',
+                        path: action.path,
+                        content: String(content),
+                    });
+                }
+            }
+            if (!result.ok && action.type === 'edit_file' && /old không khớp/i.test(String(result.error || ''))) {
+                try {
+                    const snap = await tools.run({ type: 'read_file', path: action.path });
+                    if (snap?.ok && snap.result) {
+                        result = {
+                            ...result,
+                            error: `${result.error}\n\n--- read_file ${action.path} (copy old từ đây) ---\n${String(snap.result).slice(0, 3500)}`,
+                        };
+                    }
+                } catch { /* keep original error */ }
+            }
+            if (result.ok && /create_file|edit_file|mkdir|delete_file/.test(result.type || action.type)) {
                 const audit = await auditAction(this.workspace, tools.root, action, result);
                 if (!audit.ok) {
                     result = { ...result, ok: false, changed: false, error: audit.error };
@@ -748,7 +1073,6 @@ ${TURN}`;
                         tool: action.type,
                     });
                 } else {
-                    state.rememberNeedles(collectNeedles(action));
                     if (audit.note) {
                         result = { ...result, result: `${result.result || ''}\n${audit.note}` };
                     }
@@ -760,16 +1084,40 @@ ${TURN}`;
                 }
             }
             results.push(result);
-            if (result.ok && result.diff?.length) {
-                this.emit('diff', result.path, { path: result.path, lines: result.diff });
+            const wrote = Boolean(result.ok && result.changed && /create_file|edit_file|mkdir|delete_file/.test(result.type || action.type));
+            this.emit('tool', action.path || action.command || action.query || action.type, {
+                tool: action.type,
+                path: result.path || action.path || '',
+                command: action.command || '',
+                query: action.query || '',
+                start: action.start || action.from || '',
+                end: action.end || action.to || '',
+                ok: result.ok !== false,
+                error: result.ok ? '' : (result.error || ''),
+                old: wrote && action.old != null ? String(action.old).slice(0, 8000) : '',
+                new: wrote ? String(action.new ?? action.content ?? '').slice(0, 8000) : '',
+                lines: wrote ? (result.diff || previewLines(action)) : [],
+            });
+            if (wrote && result.diff?.length) {
+                this.emit('diff', result.path, {
+                    path: result.path,
+                    lines: result.diff,
+                    old: action.old != null ? String(action.old).slice(0, 8000) : '',
+                    new: action.new != null ? String(action.new).slice(0, 8000) : '',
+                });
             }
             state.recordTool(action.type, action.path || action.command || action.query || '');
             if (result.ok && action.type === 'read_file' && action.path && !quiet) {
                 readPaths.push(action.path);
             }
             if (!result.ok) state.recordError(result.error || `${action.type} failed`);
+            if (result.ok && RUN_TOOLS.has(action.type)) {
+                state.markRunProgress();
+                this.emitPlan(state);
+            }
             if (result.changed && result.path) {
                 state.recordChange(result.path);
+                try { await this.indexer?.updateFile(tools.root, result.path); } catch { /* ignore */ }
                 if (action.type === 'create_file' && looksTruncated(action.content, action.path)) {
                     state.markTruncated(action.path);
                     this.emit('step', `File mới bị cắt: ${action.path} — gửi lại create_file đủ`);
@@ -795,40 +1143,68 @@ ${TURN}`;
         if (applied.length) {
             const report = await verifyChanges(this.workspace, tools.root, state.task, state.filesChanged);
             state.proofed = report.ok;
+            state.sweepOk = true;
             state.lastProof = formatReport(report);
             results.push({
-                ok: report.ok,
+                ok: true,
                 type: 'verify',
                 result: state.lastProof,
             });
+            const wiring = await checkWiring(this.workspace, tools.root, state.task, state.filesChanged);
+            state.wiringFail = !wiring.ok;
+            state.lastWiring = formatWiring(wiring);
+            if (wiring.notes?.length) {
+                results.push({
+                    ok: false,
+                    type: 'wiring',
+                    result: state.lastWiring,
+                });
+                this.emit('verify', state.lastWiring, { ok: false });
+            }
+            const behavior = await checkBehavior(
+                this.workspace,
+                tools.root,
+                state.task,
+                state.filesChanged,
+                state.relevantFiles,
+            );
+            state.behaviorFail = !behavior.ok;
+            state.lastBehavior = formatBehavior(behavior);
+            if (behavior.notes?.length) {
+                results.push({
+                    ok: false,
+                    type: 'behavior',
+                    result: state.lastBehavior,
+                });
+                this.emit('verify', state.lastBehavior, { ok: false });
+            }
             this.emit('verify', state.lastProof, {
                 ok: report.ok,
                 checked: report.checked || [],
                 missing: report.missing || [],
             });
-            if (state.oldNeedles.length) {
-                const leftover = await sweepLeftovers(this.workspace, tools.root, state.oldNeedles);
-                state.sweepOk = leftover.length === 0;
-                state.lastSweep = formatSweep(leftover);
-                results.push({
-                    ok: state.sweepOk,
-                    type: 'sweep',
-                    result: state.lastSweep,
-                });
-                this.emit('sweep', state.lastSweep, { ok: state.sweepOk, leftover });
-            } else {
-                state.sweepOk = true;
-                this.emit('sweep', formatSweep([]), { ok: true, leftover: [] });
-            }
+        }
+        state.batchFailed = results.some((item) => (
+            item && item.ok === false && !/^(wiring|behavior|verify)$/.test(item.type)
+        ));
+        if (state.batchFailed) {
+            this.emit('status', 'Có lỗi — sửa tiếp, không dừng');
+        } else {
+            state.clearErrors();
         }
         return { results, applied };
     }
 
-    async run({ root, message, openFile, page, memory }) {
+    async run({ root, message, openFile, page, memory, controller }) {
         this.aborted = false;
         const task = String(message || '').trim();
         const state = new AgentState(task);
-        const tools = new ToolManager(this.workspace, root, this.terminalService);
+        const tools = new ToolManager(this.workspace, root, this.terminalService, {
+            retriever: this.retriever,
+            controller,
+            siteIndex: this.siteIndex,
+            indexer: this.indexer,
+        });
         const adapter = new GeminiWebAdapter(this.gemini);
         const appliedAll = [];
 
@@ -854,29 +1230,46 @@ ${TURN}`;
 
         const firstPrompt = () => `${PROTOCOL}
 
-PROJECT MAP:
-${state.projectBrief || state.surveyDigest || '(empty)'}
+${state.projectBrief || '(no retrieved context)'}
 
 TASK:
 ${task}
 ${openFile?.path ? `\nFocused file: ${openFile.path}` : ''}
 
-Use tools now. You may edit in this same turn. ${TURN}`;
+${formatRequirements(state.requirements, state.reqIndex)}
+
+${formatKindBlock(state)}
+
+${wantsVerify(task) && !wantsFileWork(task) && state.requirements.length <= 1
+        ? 'This task is only to run the app. Emit run_start or run_command now, then done=true. Do not edit files.'
+        : 'Follow the KIND playbook for requirement 1. Survey/diagnose RELATION TREE first. done=false until every requirement is done.'} ${TURN}`;
 
         const resultPrompt = (results) => {
-            const leftover = uncoveredPlan(state);
             const onlyReads = (results || []).every((item) => READ_TOOLS.has(item.type) || item.type === 'already_read');
             const blocks = (results || []).map((item) => {
                 const head = `${item.type}${item.path ? ` ${item.path}` : ''}${item.command ? ` ${item.command}` : ''}`;
                 return `### ${head}\n${item.error || item.result || ''}`;
             }).join('\n\n');
-            let extra = leftover.length
-                ? `\nStill untouched files to EDIT:\n${leftover.map((item) => `- ${item.task}`).join('\n')}\ndone=false.`
-                : '';
-            if (onlyReads || (results || []).some((item) => item.type === 'already_read')) {
-                extra += `\nSTOP read_file. Those files are already in context. Emit edit_file / create_file now. done=false.`;
-            } else if (!leftover.length && workLeft(state, task)) {
-                extra += `\nYou already have the files. Do NOT read_file again. Emit 3–8 edit_file now. done=false.`;
+            let extra = '';
+            const failed = (results || []).filter((item) => item && item.ok === false);
+            if (failed.length) {
+                extra = `\nTOOLS FAILED — do not stop, do not done=true. Fix them now:\n${failed.map((item) => `- ${item.type} ${item.path || ''}: ${item.error || item.result || 'failed'}`).join('\n')}\nIf the path does not exist, emit create_file with full content. Then continue the KIND playbook.`;
+            } else if ((results || []).some((item) => /^SKIP /.test(String(item.result || '')))) {
+                extra = '\nSome writes were skipped because they are unrelated to the TASK. Do not retry them. If the user request is done, return actions=[] done=true.';
+            } else if (state.behaviorFail) {
+                extra = `\n${state.lastBehavior}\nImplement the real behavior now (handler + ipc/main if Electron). done=false.`;
+            } else if (state.wiringFail) {
+                extra = `\n${state.lastWiring}\nUnify state now: pass the existing list as props or move it to a shared store. done=false.`;
+            } else if (state.requirementsLeft() > 0) {
+                extra = `\n${formatKindBlock(state)}\n${formatRequirements(state.requirements, state.reqIndex)}\nFollow the KIND playbook. done=false until all ${state.requirements.length} are done.`;
+            } else if (wiringLeft(state, task)) {
+                extra = `\nFeature still disconnected. Read/edit remaining connected files so they share one source of truth:\n${relatedSurfaces(state).map((item) => `- ${item}`).join('\n')}\ndone=false.`;
+            } else if (taskSatisfied(state, task)) {
+                extra = '\nIf THIS user request is already done AND related screens share data, return {"analysis":"...","actions":[],"done":true}. Do not edit package.json/README.';
+            } else if (onlyReads || (results || []).some((item) => item.type === 'already_read')) {
+                extra = '\nThose files are already in context. Emit the edit_file that wires them to the same state. If already wired, done=true.';
+            } else if (workLeft(state, task)) {
+                extra = '\nEmit the remaining edit_file / run for THIS task only. done=false. Do not touch unrelated files.';
             }
             return `${PROTOCOL}
 
@@ -884,40 +1277,69 @@ TOOL RESULTS:
 ${blocks || '(none)'}
 ${extra}
 
-Continue the same TASK. If you just read a file, the next JSON must edit it — do not read it again.
+Continue the same TASK. Do not edit a file just because you read it. If the request is done, actions=[] done=true.
 ${TURN}`;
         };
 
         try {
-        await this.emitWorking({ type: 'think' }, 'Đang đọc dự án...');
-        this.emit('status', 'Đang đọc dự án...');
-        state.markPhase('scan');
-        const scan = await this.context.scan(root);
-        state.relevantFiles = this.context.pickRelevant(scan.tree, task, openFile);
-        const uiSurfaces = this.context.pickUiSurfaces(scan.tree);
-        state.uiCount = uiSurfaces.length;
-
-        const reuseSurvey = Boolean(
-            memory?.surveyed && memory.surveyDigest && (!memory.root || memory.root === root)
-        );
-        if (reuseSurvey) {
-            state.surveyDigest = memory.surveyDigest;
-            state.projectBrief = memory.projectBrief || memory.surveyDigest;
-            await this.emitWorking({ type: 'think' }, 'Đang làm việc…');
-            this.emit('status', 'Đang làm việc…');
-        } else {
-            await this.bootstrapSurvey(tools, state, task, state.relevantFiles, uiSurfaces);
+        this.emit('status', 'AI đang đọc nội dung để lập kế hoạch…');
+        await this.emitWorking({ type: 'think' }, 'Đang lập kế hoạch từ yêu cầu…');
+        let planned = [];
+        try {
+            const rawPlan = await send(planPrompt(task));
+            planned = parseAiPlan(rawPlan);
+        } catch {
+            planned = [];
+        }
+        state.setRequirements(planned.length ? planned : splitRequirements(task));
+        this.emitPlan(state);
+        if (state.requirements.length) {
+            const summary = state.requirements
+                .map((item, idx) => `${idx + 1}. [${kindMeta(item.kind).label}] ${item.text}`)
+                .join('\n');
+            this.emit('status', `${state.requirements.length} việc — AI đã gom từ nội dung`);
+            this.emit('step', `Kế hoạch:\n${summary}`);
+        }
+        await this.emitWorking({ type: 'think' }, 'Đang index source…');
+        this.emit('status', 'Đang quét source, chia chunk, ghi vector DB…');
+        state.markPhase('index');
+        if (this.indexer) {
+            const stats = await this.indexer.ensure(root, (msg) => this.emit('status', msg));
+            this.emit('status', `Index ${stats.chunks} chunks / ${stats.files} files`);
         }
 
+        const urls = extractUrls(task);
+        if (urls.length && this.siteIndex && controller) {
+            await this.emitWorking({ type: 'browser_open', path: urls[0] }, `Đang đọc website ${urls[0]}…`);
+            this.emit('status', `Đang crawl ${urls[0]}…`);
+            const site = await this.siteIndex.capture(controller, urls[0]);
+            if (site.ok) {
+                state.surveyDigest = site.digest;
+                this.emit('step', `Đã nạp giao diện ${site.title || urls[0]} vào vector DB`);
+            }
+        }
+
+        await this.emitWorking({ type: 'retrieve', query: task.slice(0, 48) }, 'Đang retrieve context…');
+        this.emit('status', 'Đang tìm file/đoạn code liên quan…');
+        const retrieved = this.retriever
+            ? this.retriever.retrieve(
+                state.currentRequirement()?.text
+                    ? `${state.currentRequirement().text}\n${task}`
+                    : task,
+                { openFile, k: 10, extra: [state.surveyDigest] },
+            )
+            : { files: [], digest: '', tree: '' };
+        this.applyRetrieved(state, retrieved);
         state.markPhase('execute');
-        await this.emitWorking({ type: 'think' }, `${this.llmName} đang chạy…`);
+        await this.emitWorking({ type: 'think' }, `${this.llmName} đang lập kế hoạch…`);
         this.emit('status', `${this.llmName} đang chạy…`);
         let raw = await send(firstPrompt());
         let parsed = this.ingest(state, raw);
         let empty = 0;
         let readStreak = 0;
+        const maxIters = Math.min(36, Math.max(MAX_ITERS, 8 * Math.max(1, state.requirements.length)));
 
-        for (let i = 1; i <= MAX_ITERS; i += 1) {
+        for (let i = 1; i <= maxIters; i += 1) {
             this.throwIfAborted();
             state.iteration = i;
 
@@ -929,19 +1351,40 @@ ${TURN}`;
             parsed.actions = attachReadRanges(parsed.actions, parsed);
             const deduped = dropDuplicateReads(parsed.actions, state);
             parsed.actions = deduped.actions;
+            const gate = kindProgress(state);
+            if (!gate.ok && (gate.reason === 'survey' || gate.reason === 'diagnose')) {
+                const blocked = parsed.actions.filter((item) => WRITE_TOOLS.has(item.type));
+                if (blocked.length) {
+                    parsed.actions = parsed.actions.filter((item) => !WRITE_TOOLS.has(item.type));
+                    this.emit('step', `Chặn sửa — ${gate.hint || 'khảo sát / tìm nguyên nhân trước'}`);
+                }
+            }
             if (deduped.skipped.length && !parsed.actions.length && readStreak < 2) {
                 readStreak += 1;
-                this.emit('status', 'File đã đọc — chuyển sang sửa…');
-                raw = await send(`${PROTOCOL}
+                const unread = (state.relevantFiles || []).filter((rel) => !(state.filesRead || []).includes(rel));
+                if (!gate.ok && (gate.reason === 'survey' || gate.reason === 'diagnose')) {
+                    this.emit('status', gate.reason === 'diagnose' ? 'Đang tìm nguyên nhân…' : 'Đang khảo sát cây liên hệ…');
+                    raw = await send(this.buildKindPlaybookPrompt(state, task, {
+                        ...gate,
+                        hint: unread.length
+                            ? `File đã đọc. Đọc tiếp RELATION TREE:\n${unread.slice(0, 8).join('\n')}`
+                            : gate.hint,
+                    }));
+                } else {
+                    this.emit('status', 'File đã đọc — chuyển sang sửa…');
+                    raw = await send(`${PROTOCOL}
 
 TASK:
 ${task}
 
+${formatKindBlock(state)}
+
 ALREADY READ (do not read again):
 ${deduped.skipped.join('\n')}
 
-You already have the numbered lines. Emit 3–8 edit_file / create_file now. done=false.
+You already have the numbered lines. Emit the edit_file this KIND playbook still needs, or done=true if THIS requirement is already done.
 ${TURN}`);
+                }
                 parsed = this.ingest(state, raw);
                 parsed.done = false;
                 parsed.claimedDone = false;
@@ -949,12 +1392,46 @@ ${TURN}`);
             }
 
             if (!parsed.actions.length) {
-                if (workLeft(state, task) && empty < 4) {
+                if (this.shouldAdvanceRequirement(state, parsed, task, empty)) {
+                    state.advanceRequirement();
+                    this.emitPlan(state);
+                    if (state.reqIndex < state.requirements.length) {
+                        const next = state.currentRequirement();
+                        const idx = state.reqIndex + 1;
+                        const n = state.requirements.length;
+                        const label = kindMeta(next?.kind).label;
+                        empty = 0;
+                        this.emit('status', `Yêu cầu ${idx}/${n} · ${label}`);
+                        this.emit('step', `${label}: ${(next?.text || '').slice(0, 100)}`);
+                        this.refreshRetrieved(state, `${next?.text || ''} ${task}`, openFile);
+                        raw = await send(this.buildNextRequirementPrompt(state, task));
+                        parsed = this.ingest(state, raw);
+                        parsed.done = false;
+                        parsed.claimedDone = false;
+                        continue;
+                    }
+                    this.emit('step', `Đã xong ${state.requirements.length} yêu cầu`);
+                }
+                if (workLeft(state, task) && empty < 8) {
                     empty += 1;
-                    this.emit('status', 'Còn việc — tiếp tục…');
-                    raw = await send(`${this.buildKeepWorkingPrompt(state, task)}
-
-Do not emit read_file for files you already received. Actions must have {"type":"edit_file","path":"...","old":"...","new":"..."}.`);
+                    const progress = kindProgress(state);
+                    const hasErrors = Boolean(state.batchFailed || (state.currentErrors || []).length);
+                    this.emit('status', hasErrors
+                        ? 'Có lỗi — sửa tiếp, không dừng'
+                        : progress.reason === 'diagnose'
+                            ? 'Đang tìm nguyên nhân lỗi…'
+                            : progress.reason === 'survey'
+                                ? 'Đang khảo sát cây liên hệ…'
+                                : state.requirements.length > 1
+                                    ? `Còn yêu cầu ${state.reqIndex + 1}/${state.requirements.length} — tiếp tục…`
+                                    : 'Còn việc — tiếp tục…');
+                    raw = await send(
+                        hasErrors
+                            ? this.buildFixErrorsPrompt(state, task)
+                            : !progress.ok && (progress.reason === 'survey' || progress.reason === 'diagnose')
+                                ? this.buildKindPlaybookPrompt(state, task, progress)
+                                : this.buildKeepWorkingPrompt(state, task),
+                    );
                     parsed = this.ingest(state, raw);
                     parsed.done = false;
                     parsed.claimedDone = false;
@@ -976,10 +1453,20 @@ Do not emit read_file for files you already received. Actions must have {"type":
             if (parsed.actions.some((item) => WRITE_TOOLS.has(item.type))) readStreak = 0;
             else if (parsed.actions.every((item) => READ_TOOLS.has(item.type))) readStreak += 1;
             const quiet = parsed.actions.every((item) => READ_TOOLS.has(item.type));
-            this.emit('status', quiet ? 'Đang đọc…' : `Đang sửa (${parsed.actions.filter((item) => WRITE_TOOLS.has(item.type)).length})…`);
+            const phase = kindProgress(state);
+            this.emit('status', quiet
+                ? (phase.reason === 'diagnose' ? 'Đang tìm nguyên nhân…' : 'Đang khảo sát…')
+                : `Đang sửa (${parsed.actions.filter((item) => WRITE_TOOLS.has(item.type)).length})…`);
             const { results, applied } = await this.executeActions(tools, parsed.actions, state);
             appliedAll.push(...applied);
-            if (i === MAX_ITERS) break;
+            if (i === maxIters) break;
+            const skippedAll = results.length
+                && !applied.length
+                && results.every((item) => /^SKIP /.test(String(item.result || '')) || READ_TOOLS.has(item.type));
+            if (skippedAll && taskSatisfied(state, task) && results.some((item) => /^SKIP /.test(String(item.result || '')))) {
+                this.markFinished(state, task);
+                break;
+            }
             raw = await send(resultPrompt(results));
             parsed = this.ingest(state, raw);
         }

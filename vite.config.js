@@ -3,7 +3,13 @@ const vue = require('@vitejs/plugin-vue');
 const path = require('path');
 
 module.exports = defineConfig({
-    plugins: [vue()],
+    plugins: [vue({
+        template: {
+            compilerOptions: {
+                isCustomElement: (tag) => tag === 'webview',
+            },
+        },
+    })],
     root: path.join(__dirname, 'renderer'),
     base: './',
     build: {

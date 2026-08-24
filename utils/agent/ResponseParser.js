@@ -6,6 +6,7 @@ const ACTIONS = new Set([
     'create_file', 'edit_file', 'delete_file', 'mkdir',
     'run_command', 'run_test', 'run_build', 'run_start', 'run_stop',
     'git_status', 'git_diff', 'git_log',
+    'retrieve', 'browser_open', 'screenshot',
 ]);
 
 function sanitizeJsonText(text) {
@@ -181,14 +182,21 @@ function mapType(type) {
         read_file: 'read_file',
         search: 'search_code',
         grep: 'search_code',
+        retrieve: 'retrieve',
+        semantic_search: 'retrieve',
         test: 'run_test',
         build: 'run_build',
         command: 'run_command',
         shell: 'run_command',
+        run_terminal: 'run_command',
+        terminal: 'run_command',
         start: 'run_start',
         run_dev: 'run_start',
         serve: 'run_start',
         stop: 'run_stop',
+        browser_open: 'browser_open',
+        open_url: 'browser_open',
+        screenshot: 'screenshot',
     }[key] || key;
 }
 
@@ -237,6 +245,7 @@ function normalizeAction(raw) {
     if (raw.query != null) action.query = String(raw.query);
     if (raw.command != null) action.command = String(raw.command);
     if (raw.cmd != null && !action.command) action.command = String(raw.cmd);
+    if (raw.url != null) action.url = String(raw.url).trim();
     if (raw.background === true) action.background = true;
     if (raw.replace_all === true || raw.replaceAll === true) action.replace_all = true;
     if (raw.start != null) action.start = Number(raw.start);

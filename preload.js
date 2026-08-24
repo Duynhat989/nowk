@@ -16,9 +16,6 @@ contextBridge.exposeInMainWorld('api', {
     deleteProfile: (data) => ipcRenderer.invoke('profiles:delete', data),
     openProfile: (data) => ipcRenderer.invoke('profiles:open', data),
     closeProfile: (data) => ipcRenderer.invoke('profiles:close', data),
-    randomFingerprint: () => ipcRenderer.invoke('fingerprint:random'),
-    nativeFingerprint: () => ipcRenderer.invoke('fingerprint:native'),
-    consistentFingerprint: (data) => ipcRenderer.invoke('fingerprint:consistent', data),
     onProfileStatus: (callback) => {
         const handler = (_, data) => callback(data);
         ipcRenderer.on('profile-status', handler);
@@ -26,6 +23,11 @@ contextBridge.exposeInMainWorld('api', {
     },
 
     pickProjectFolder: () => ipcRenderer.invoke('workspace:pick'),
+    pickProjectParent: () => ipcRenderer.invoke('workspace:pick-parent'),
+    defaultProjectParent: () => ipcRenderer.invoke('workspace:default-parent'),
+    createProject: (data) => ipcRenderer.invoke('workspace:create-project', toPlain(data)),
+    cloneProject: (data) => ipcRenderer.invoke('workspace:clone', toPlain(data)),
+    listProjectTemplates: () => ipcRenderer.invoke('workspace:templates'),
     openProjectFolder: (data) => ipcRenderer.invoke('workspace:open', toPlain(data)),
     listRecentProjects: () => ipcRenderer.invoke('workspace:recents'),
     removeRecentProject: (data) => ipcRenderer.invoke('workspace:remove-recent', toPlain(data)),
@@ -35,9 +37,15 @@ contextBridge.exposeInMainWorld('api', {
         ipcRenderer.on('workspace:pick-request', handler);
         return () => ipcRenderer.removeListener('workspace:pick-request', handler);
     },
+    onEditorCommand: (callback) => {
+        const handler = (_, action) => callback(action);
+        ipcRenderer.on('editor-command', handler);
+        return () => ipcRenderer.removeListener('editor-command', handler);
+    },
     listWorkspace: (data) => ipcRenderer.invoke('workspace:list', toPlain(data)),
     gitStatus: (data) => ipcRenderer.invoke('workspace:git-status', toPlain(data)),
     readWorkspaceFile: (data) => ipcRenderer.invoke('workspace:read', toPlain(data)),
+    readWorkspaceMedia: (data) => ipcRenderer.invoke('workspace:media', toPlain(data)),
     writeWorkspaceFile: (data) => ipcRenderer.invoke('workspace:write', toPlain(data)),
     createWorkspaceItem: (data) => ipcRenderer.invoke('workspace:create', toPlain(data)),
     deleteWorkspaceItem: (data) => ipcRenderer.invoke('workspace:delete', toPlain(data)),
@@ -70,6 +78,22 @@ contextBridge.exposeInMainWorld('api', {
         const handler = (_, data) => callback(data);
         ipcRenderer.on('agent-progress', handler);
         return () => ipcRenderer.removeListener('agent-progress', handler);
+    },
+
+    authSession: () => ipcRenderer.invoke('auth:session'),
+    authRegister: (data) => ipcRenderer.invoke('auth:register', toPlain(data)),
+    authPoll: (data) => ipcRenderer.invoke('auth:poll', toPlain(data)),
+    authAbandon: (data) => ipcRenderer.invoke('auth:abandon', toPlain(data)),
+    authFinish: (data) => ipcRenderer.invoke('auth:finish', toPlain(data)),
+    onAuthHeartbeat: (callback) => {
+        const handler = (_, data) => callback(data);
+        ipcRenderer.on('auth-heartbeat', handler);
+        return () => ipcRenderer.removeListener('auth-heartbeat', handler);
+    },
+    onAuthForcedLogout: (callback) => {
+        const handler = (_, data) => callback(data);
+        ipcRenderer.on('auth-forced-logout', handler);
+        return () => ipcRenderer.removeListener('auth-forced-logout', handler);
     },
 
     getSettings: () => ipcRenderer.invoke('settings:get'),

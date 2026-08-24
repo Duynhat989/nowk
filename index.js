@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, ipcMain, dialog, shell, globalShortcut } = require('electron');
+const { app, BrowserWindow, Menu, ipcMain, dialog, shell, globalShortcut, nativeImage } = require('electron');
 const fs = require('fs');
 const path = require('path');
 const ProfileStore = require('./utils/ProfileStore');
@@ -9,10 +9,15 @@ const WorkspaceService = require('./utils/WorkspaceService');
 const WorkspaceWatcher = require('./utils/WorkspaceWatcher');
 const AgentRunner = require('./utils/AgentRunner');
 const TerminalService = require('./utils/TerminalService');
-const FingerprintGenerator = require('./chrome/FingerprintRandomizer');
+const NanoAuth = require('./utils/NanoAuth');
 const { toPlain } = require('./utils/ipcPlain');
 const { parseProxy } = require('./utils/parseProxy');
 const { isWin, isMac, isLinux, resolvePickedChrome } = require('./utils/runtimePlatform');
+const os = require('os');
+const { execFile } = require('child_process');
+const { promisify } = require('util');
+const execFileAsync = promisify(execFile);
+const { listKinds, promptFor, scaffoldFiles } = require('./utils/projectTemplates');
 
 const isDev = process.argv.includes('--dev');
 const runningBrowsers = new Map();
@@ -22,6 +27,7 @@ let mainWindow;
 let projectPath;
 let profileStore;
 let settingsStore;
+let nanoAuth;
 let chromeResolver;
 let profileLauncher;
 let workspaceService;
@@ -179,6 +185,7 @@ function ensureAppServices() {
     const dataDir = path.join(configDir, 'data');
     profileStore = new ProfileStore(dataDir);
     settingsStore = new SettingsStore(configDir);
+    nanoAuth = new NanoAuth(configDir);
     chromeResolver = new ChromeResolver();
     workspaceService = new WorkspaceService({
         onChange: (data) => {
@@ -239,6 +246,21 @@ function bindWindowSession(win) {
     return session;
 }
 
+function appIconImage() {
+    const png = path.join(__dirname, 'build', 'icon.png');
+    const image = nativeImage.createFromPath(png);
+    return image.isEmpty() ? null : image;
+}
+
+function applyAppIcon(win) {
+    const image = appIconImage();
+    if (!image) return;
+    try { win?.setIcon(image); } catch { /* ignore */ }
+    if (isMac && app.dock) {
+        try { app.dock.setIcon(image); } catch { /* ignore */ }
+    }
+}
+
 function createWindow() {
     ensureAppServices();
     const win = new BrowserWindow({
@@ -248,16 +270,19 @@ function createWindow() {
         minHeight: 600,
         backgroundColor: '#111113',
         title: 'NowK',
+        icon: path.join(__dirname, 'build', 'icon.png'),
         titleBarStyle: isMac ? 'hiddenInset' : 'default',
         autoHideMenuBar: false,
         webPreferences: {
             preload: path.join(__dirname, 'preload.js'),
             contextIsolation: true,
             nodeIntegration: false,
+            webviewTag: true,
             devTools: true,
         },
     });
 
+    applyAppIcon(win);
     bindWindowSession(win);
     registerDevToolsInput(win);
 
@@ -306,7 +331,39 @@ function buildAppMenu() {
                 isMac ? { role: 'close' } : { role: 'quit' },
             ],
         },
-        { role: 'editMenu' },
+        {
+            label: 'Edit',
+            submenu: [
+                { role: 'undo' },
+                { role: 'redo' },
+                { type: 'separator' },
+                { role: 'cut' },
+                { role: 'copy' },
+                { role: 'paste' },
+                { role: 'selectAll' },
+                { type: 'separator' },
+                {
+                    label: 'Find',
+                    accelerator: 'CmdOrCtrl+F',
+                    click: (_, win) => (win || focusedSession()?.window)?.webContents.send('editor-command', 'find'),
+                },
+                {
+                    label: 'Replace',
+                    accelerator: isMac ? 'Alt+Cmd+F' : 'CmdOrCtrl+H',
+                    click: (_, win) => (win || focusedSession()?.window)?.webContents.send('editor-command', 'replace'),
+                },
+                {
+                    label: 'Find Next',
+                    accelerator: 'CmdOrCtrl+G',
+                    click: (_, win) => (win || focusedSession()?.window)?.webContents.send('editor-command', 'findNext'),
+                },
+                {
+                    label: 'Find Previous',
+                    accelerator: 'Shift+CmdOrCtrl+G',
+                    click: (_, win) => (win || focusedSession()?.window)?.webContents.send('editor-command', 'findPrev'),
+                },
+            ],
+        },
         { role: 'viewMenu' },
         { role: 'windowMenu' },
     ];
@@ -336,7 +393,9 @@ const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
     app.quit();
 } else {
-    app.on('second-instance', () => {
+    app.on('second-instance', (_event, argv) => {
+        const deep = (argv || []).find((arg) => String(arg).startsWith('nowk://'));
+        if (deep && nanoAuth) nanoAuth.applyDeepLink(deep);
         const win = focusedSession()?.window || BrowserWindow.getAllWindows()[0];
         if (win && !win.isDestroyed()) {
             if (win.isMinimized()) win.restore();
@@ -347,7 +406,31 @@ if (!gotLock) {
         if (app.isReady()) createWindow();
     });
 
-    app.whenReady().then(() => {
+    app.on('open-url', (event, url) => {
+        event.preventDefault();
+        if (nanoAuth) nanoAuth.applyDeepLink(url);
+    });
+
+    app.whenReady().then(async () => {
+        ensureAppServices();
+        try {
+            if (process.defaultApp) {
+                app.setAsDefaultProtocolClient('nowk', process.execPath, [path.resolve(process.argv[1])]);
+            } else {
+                app.setAsDefaultProtocolClient('nowk');
+            }
+        } catch { /* ignore */ }
+        try { await nanoAuth.load(); } catch { /* ignore */ }
+        nanoAuth.onHeartbeat = (data) => sendToRenderer('auth-heartbeat', toPlain(data));
+        nanoAuth.onForcedLogout = (data) => sendToRenderer('auth-forced-logout', toPlain(data || {}));
+        if (nanoAuth.cached.accessToken) nanoAuth.startWatch();
+        try { await nanoAuth.startServer(); } catch (err) {
+            console.error('[auth] local server', err.message);
+        }
+        const deepArg = (process.argv || []).find((arg) => String(arg).startsWith('nowk://'));
+        if (deepArg) nanoAuth.applyDeepLink(deepArg);
+        applyAppIcon();
+        try { await profileLauncher.reclaimAll(); } catch { /* ignore */ }
         buildAppMenu();
         createWindow();
         registerDevToolsShortcuts();
@@ -355,6 +438,16 @@ if (!gotLock) {
             if (BrowserWindow.getAllWindows().length === 0) createWindow();
         });
     });
+}
+
+let quitting = false;
+
+async function shutdownProfiles() {
+    if (!profileLauncher) return;
+    await Promise.race([
+        profileLauncher.closeAll(),
+        new Promise((resolve) => setTimeout(resolve, 8000)),
+    ]);
 }
 
 app.on('will-quit', () => {
@@ -370,14 +463,11 @@ app.on('window-all-closed', () => {
     if (!isMac) app.quit();
 });
 
-let quitting = false;
 app.on('before-quit', (event) => {
-    if (quitting || runningBrowsers.size === 0) return;
+    if (quitting) return;
     event.preventDefault();
     quitting = true;
-    Promise.allSettled([...runningBrowsers.values()].map((entry) => (
-        entry.controller.close().catch(() => {})
-    ))).finally(() => app.quit());
+    shutdownProfiles().finally(() => app.quit());
 });
 
 function normalizeProfileProxy(proxy) {
@@ -397,49 +487,22 @@ ipcMain.handle('profiles:list', async () => profileStore.loadAll());
 
 ipcMain.handle('profiles:create', async (_, data) => {
     const settings = await settingsStore.load();
-    const gen = new FingerprintGenerator();
 
     const profile = await profileStore.create({
         name: data.name,
         notes: data.notes,
         proxy: normalizeProfileProxy(data.proxy),
-        fingerprint: data.fingerprint || { mode: 'consistent' },
-        startupUrl: data.startupUrl || settings.defaultStartupUrl,
+        fingerprint: { mode: 'open' },
+        startupUrl: data.startupUrl || settings.defaultStartupUrl || '',
     });
-
-    let fingerprint;
-    if (data.randomFingerprint) {
-        fingerprint = gen.generate();
-    } else if (data.fingerprint) {
-        fingerprint = data.fingerprint;
-        if (fingerprint.mode === 'consistent' && !fingerprint.noiseSeed) {
-            fingerprint = gen.generateConsistent(profile.id);
-        }
-    } else {
-        fingerprint = gen.generateConsistent(profile.id);
-    }
-
-    const updated = await profileStore.update(profile.id, { fingerprint });
-    return { success: true, profile: updated };
+    return { success: true, profile };
 });
 
 ipcMain.handle('profiles:update', async (_, { id, ...updates }) => {
     if (updates.proxy) {
         updates.proxy = normalizeProfileProxy(updates.proxy);
     }
-    if (updates.fingerprint?.mode === 'consistent') {
-        const existing = await profileStore.getById(id);
-        const prev = existing?.fingerprint || {};
-        if (prev.noiseSeed) {
-            updates.fingerprint = { ...prev, ...updates.fingerprint };
-            if (updates.fingerprint.timezone) {
-                updates.fingerprint.timezoneOffset = new FingerprintGenerator()
-                    .getOffsetFor(updates.fingerprint.timezone);
-            }
-        } else {
-            updates.fingerprint = new FingerprintGenerator().generateConsistent(id);
-        }
-    }
+    delete updates.fingerprint;
     const profile = await profileStore.update(id, updates);
     return { success: !!profile, profile };
 });
@@ -459,12 +522,6 @@ ipcMain.handle('profiles:delete', async (_, { id, deleteData }) => {
 
     const deleted = await profileStore.delete(id);
     return { success: deleted };
-});
-
-ipcMain.handle('fingerprint:random', async () => new FingerprintGenerator().generate());
-ipcMain.handle('fingerprint:native', async () => new FingerprintGenerator().generateNative());
-ipcMain.handle('fingerprint:consistent', async (_, { profileId } = {}) => {
-    return new FingerprintGenerator().generateConsistent(profileId || require('crypto').randomUUID());
 });
 
 ipcMain.handle('profiles:open', async (_, { id }) => {
@@ -500,6 +557,105 @@ ipcMain.handle('workspace:pick', async (event) => {
     await rememberRecent(root);
     attachProject(root, session);
     return { success: true, root, name: path.basename(root) };
+});
+
+ipcMain.handle('workspace:default-parent', async () => ({
+    success: true,
+    path: os.homedir(),
+}));
+
+ipcMain.handle('workspace:pick-parent', async (event) => {
+    const session = syncSession(sessionFromEvent(event) || focusedSession());
+    const result = await dialog.showOpenDialog(session?.window || mainWindow, {
+        properties: ['openDirectory', 'createDirectory'],
+        title: 'Chọn chỗ lưu project',
+        defaultPath: os.homedir(),
+    });
+    if (result.canceled || !result.filePaths.length) return { success: false };
+    return { success: true, path: result.filePaths[0] };
+});
+
+ipcMain.handle('workspace:templates', async () => ({
+    success: true,
+    templates: listKinds(),
+}));
+
+ipcMain.handle('workspace:create-project', async (event, payload = {}) => {
+    try {
+        const session = syncSession(sessionFromEvent(event) || focusedSession());
+        const parent = path.resolve(String(payload.parent || os.homedir()));
+        const rawName = String(payload.name || '').trim().replace(/[<>:"|?*\\/]/g, '-').replace(/\s+/g, '-');
+        if (!rawName || rawName === '.' || rawName === '..') {
+            return { success: false, error: 'Tên folder không hợp lệ.' };
+        }
+        const kind = String(payload.kind || 'vue3');
+        if (!listKinds().some((item) => item.id === kind)) {
+            return { success: false, error: 'Kiểu dự án không hỗ trợ.' };
+        }
+        if (!fs.existsSync(parent) || !fs.statSync(parent).isDirectory()) {
+            return { success: false, error: 'Thư mục lưu không tồn tại.' };
+        }
+        const root = path.join(parent, rawName);
+        if (fs.existsSync(root) && fs.readdirSync(root).length) {
+            return { success: false, error: 'Folder đã có nội dung. Chọn tên khác.' };
+        }
+        fs.mkdirSync(root, { recursive: true });
+        const files = scaffoldFiles(kind, rawName);
+        for (const [rel, body] of Object.entries(files)) {
+            const abs = path.join(root, rel);
+            fs.mkdirSync(path.dirname(abs), { recursive: true });
+            fs.writeFileSync(abs, body, 'utf8');
+        }
+        await rememberRecent(root);
+        attachProject(root, session);
+        return {
+            success: true,
+            root,
+            name: path.basename(root),
+            kind,
+            prompt: promptFor(kind),
+        };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('workspace:clone', async (event, payload = {}) => {
+    try {
+        const session = syncSession(sessionFromEvent(event) || focusedSession());
+        const rawUrl = String(payload.url || '').trim();
+        if (!/^(https?:\/\/|git@)/i.test(rawUrl) || /\s/.test(rawUrl)) {
+            return { success: false, error: 'URL git không hợp lệ.' };
+        }
+        const parent = path.resolve(String(payload.parent || os.homedir()));
+        let rawName = String(payload.name || '').trim().replace(/[<>:"|?*\\]/g, '-');
+        if (!rawName) {
+            rawName = rawUrl.replace(/\.git$/i, '').split(/[/:]/).filter(Boolean).pop() || 'repo';
+        }
+        if (!rawName || rawName === '.' || rawName === '..') {
+            return { success: false, error: 'Tên folder không hợp lệ.' };
+        }
+        if (!fs.existsSync(parent) || !fs.statSync(parent).isDirectory()) {
+            return { success: false, error: 'Thư mục lưu không tồn tại.' };
+        }
+        const root = path.join(parent, rawName);
+        if (fs.existsSync(root)) {
+            return { success: false, error: 'Folder đã tồn tại. Chọn tên khác.' };
+        }
+        await execFileAsync('git', ['clone', '--', rawUrl, root], {
+            timeout: 180000,
+            windowsHide: true,
+        });
+        await rememberRecent(root);
+        attachProject(root, session);
+        return { success: true, root, name: path.basename(root) };
+    } catch (error) {
+        const msg = String(error?.stderr || error?.message || error);
+        if (/ENOENT|not found/i.test(msg)) {
+            return { success: false, error: 'Không tìm thấy git trên máy.' };
+        }
+        return { success: false, error: msg.slice(0, 280) };
+    }
 });
 
 ipcMain.handle('workspace:open', async (event, { root }) => {
@@ -558,6 +714,16 @@ ipcMain.handle('workspace:read', async (_, { root, relPath }) => {
     try {
         const folder = requireWorkspaceRoot(root);
         const result = await workspaceService.readFile(folder, relPath);
+        return { success: true, ...result };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('workspace:media', async (_, { root, relPath }) => {
+    try {
+        const folder = requireWorkspaceRoot(root);
+        const result = await workspaceService.readMedia(folder, relPath);
         return { success: true, ...result };
     } catch (error) {
         return { success: false, error: error.message };
@@ -681,6 +847,58 @@ ipcMain.handle('agent:chat', async (event, data) => {
     }
 });
 
+ipcMain.handle('auth:session', async () => {
+    ensureAppServices();
+    const stored = await nanoAuth.load();
+    if (!stored.accessToken) return { loggedIn: false, balance: 0 };
+    const checked = await nanoAuth.verify(stored.accessToken);
+    if (!checked.valid) {
+        await nanoAuth.clear();
+        return { loggedIn: false, balance: 0 };
+    }
+    await nanoAuth.save({
+        accessToken: checked.token || stored.accessToken,
+        balance: checked.balance,
+    });
+    nanoAuth.startWatch();
+    return { loggedIn: true, balance: checked.balance };
+});
+
+ipcMain.handle('auth:register', async (_, { token } = {}) => {
+    ensureAppServices();
+    if (!nanoAuth.port) await nanoAuth.startServer();
+    nanoAuth.register(token);
+    return { success: true, url: nanoAuth.signInUrl(token) };
+});
+
+ipcMain.handle('auth:poll', async (_, { token } = {}) => {
+    ensureAppServices();
+    return nanoAuth.poll(token);
+});
+
+ipcMain.handle('auth:abandon', async (_, { token } = {}) => {
+    ensureAppServices();
+    return nanoAuth.abandon(token);
+});
+
+ipcMain.handle('auth:finish', async (_, { accessToken } = {}) => {
+    ensureAppServices();
+    const checked = await nanoAuth.verify(accessToken);
+    if (!checked.valid) return { success: false, message: 'invalid' };
+    await nanoAuth.save({
+        accessToken: checked.token || accessToken,
+        balance: checked.balance,
+    });
+    nanoAuth.startWatch();
+    return { success: true, balance: checked.balance };
+});
+
+ipcMain.handle('auth:logout', async () => {
+    ensureAppServices();
+    await nanoAuth.clear();
+    return { success: true };
+});
+
 ipcMain.handle('settings:get', async () => {
     const settings = await settingsStore.load();
     const channels = chromeResolver.getAvailableChannels();
@@ -753,7 +971,12 @@ ipcMain.handle('settings:open-folder', async (_, folderPath) => {
 });
 
 ipcMain.handle('app:open-external', async (_, url) => {
-    await shell.openExternal(url);
+    try {
+        await shell.openExternal(url);
+        return { success: true };
+    } catch (err) {
+        return { success: false, error: err.message };
+    }
 });
 
 ipcMain.handle('app:toggle-devtools', async (event) => {

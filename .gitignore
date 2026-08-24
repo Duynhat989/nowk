@@ -38,3 +38,4 @@ public/node_modules
 /temp/
 /.user_data/
 /.electron-cache/
+.nowk/

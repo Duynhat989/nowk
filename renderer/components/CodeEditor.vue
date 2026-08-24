@@ -1,5 +1,48 @@
 <template>
   <div class="code-editor" @contextmenu.prevent="openMenu">
+    <div
+      v-if="findOpen"
+      class="cm-find"
+      @mousedown.stop
+      @contextmenu.stop
+    >
+      <div class="cm-find-row">
+        <input
+          ref="findInput"
+          v-model="findText"
+          type="text"
+          :placeholder="t('ide.find')"
+          spellcheck="false"
+          @keydown="onFindKey"
+        >
+        <span class="cm-find-count" :class="{ empty: !matchTotal }">{{ matchLabel }}</span>
+        <button type="button" class="cm-find-toggle" :class="{ on: matchCase }" :title="t('ide.matchCase')" @click="toggleOpt('case')">Aa</button>
+        <button type="button" class="cm-find-toggle" :class="{ on: wholeWord }" :title="t('ide.wholeWord')" @click="toggleOpt('word')">ab</button>
+        <button type="button" class="cm-find-toggle" :class="{ on: useRegex }" :title="t('ide.useRegex')" @click="toggleOpt('regex')">.*</button>
+        <button type="button" :title="t('ide.findPrev')" @click="goPrev">↑</button>
+        <button type="button" :title="t('ide.findNext')" @click="goNext">↓</button>
+        <button
+          type="button"
+          class="cm-find-toggle"
+          :class="{ on: replaceOpen }"
+          :title="t('ide.replace')"
+          @click="replaceOpen = !replaceOpen"
+        >⇄</button>
+        <button type="button" :title="t('common.close')" @click="closeFind">×</button>
+      </div>
+      <div v-if="replaceOpen" class="cm-find-row">
+        <input
+          v-model="replaceText"
+          type="text"
+          :placeholder="t('ide.replace')"
+          spellcheck="false"
+          @keydown="onReplaceKey"
+        >
+        <button type="button" @click="doReplace">{{ t('ide.replace') }}</button>
+        <button type="button" @click="doReplaceAll">{{ t('ide.replaceAll') }}</button>
+      </div>
+    </div>
+
     <div ref="host" class="cm-host" />
 
     <Teleport to="body">
@@ -18,6 +61,9 @@
             {{ t('ide.format') }}
           </button>
           <div class="file-ctx-sep" />
+          <button type="button" @click="act('find')">{{ t('ide.find') }}</button>
+          <button type="button" @click="act('replace')">{{ t('ide.replace') }}</button>
+          <div class="file-ctx-sep" />
           <button type="button" :disabled="!hasSelection" @click="act('cut')">{{ t('ide.cut') }}</button>
           <button type="button" :disabled="!hasSelection" @click="act('copy')">{{ t('ide.copy') }}</button>
           <button type="button" @click="act('paste')">{{ t('ide.paste') }}</button>
@@ -29,7 +75,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter } from '@codemirror/view';
 import { EditorState, Compartment } from '@codemirror/state';
@@ -42,6 +88,17 @@ import {
   indentOnInput,
 } from '@codemirror/language';
 import { tags as highlightTags } from '@lezer/highlight';
+import {
+  SearchQuery,
+  findNext,
+  findPrevious,
+  highlightSelectionMatches,
+  replaceAll,
+  replaceNext,
+  search,
+  selectNextOccurrence,
+  setSearchQuery,
+} from '@codemirror/search';
 import { languageSupport } from '../utils/editorLanguage.js';
 import { canFormat, formatCode } from '../utils/formatCode.js';
 
@@ -53,13 +110,31 @@ const props = defineProps({
 const emit = defineEmits(['update:modelValue']);
 const { t } = useI18n();
 const host = ref(null);
+const findInput = ref(null);
 const menu = ref(null);
 const hasSelection = ref(false);
+const findOpen = ref(false);
+const replaceOpen = ref(false);
+const findText = ref('');
+const replaceText = ref('');
+const matchCase = ref(false);
+const wholeWord = ref(false);
+const useRegex = ref(false);
+const matchIndex = ref(0);
+const matchTotal = ref(0);
+const queryValid = ref(true);
 let view = null;
 let applying = false;
 const langCompartment = new Compartment();
+const isMac = window.platform === 'darwin';
 
 const canPretty = computed(() => canFormat(props.filename));
+const matchLabel = computed(() => {
+  if (!findText.value) return '';
+  if (!queryValid.value) return t('ide.invalidRegex');
+  if (!matchTotal.value) return t('ide.noResults');
+  return t('ide.matchCount', { current: matchIndex.value || 1, total: matchTotal.value });
+});
 
 const highlight = HighlightStyle.define([
   { tag: highlightTags.keyword, color: '#569cd6' },
@@ -114,6 +189,9 @@ const editorTheme = EditorView.theme({
   },
   '.cm-cursor': { borderLeftColor: '#fff' },
   '.cm-foldGutter .cm-gutterElement': { color: '#6e6e6e' },
+  '.cm-searchMatch': { backgroundColor: '#623315', outline: '1px solid #ffa657' },
+  '.cm-searchMatch-selected': { backgroundColor: '#515c6a', outline: '1px solid #f8f8f2' },
+  '.cm-selectionMatch': { backgroundColor: '#3a3d41' },
 }, { dark: true });
 
 function currentText() {
@@ -145,11 +223,133 @@ function syncSelection() {
   hasSelection.value = range.from !== range.to;
 }
 
+function makeQuery() {
+  return new SearchQuery({
+    search: findText.value,
+    replace: replaceText.value,
+    caseSensitive: matchCase.value,
+    regexp: useRegex.value,
+    wholeWord: wholeWord.value,
+  });
+}
+
+function applyQuery() {
+  if (!view) return makeQuery();
+  const query = makeQuery();
+  queryValid.value = !findText.value || query.valid;
+  view.dispatch({ effects: setSearchQuery.of(query) });
+  refreshCount(query);
+  return query;
+}
+
+function refreshCount(query = makeQuery()) {
+  if (!view || !query.search || !query.valid) {
+    matchIndex.value = 0;
+    matchTotal.value = 0;
+    return;
+  }
+  const sel = view.state.selection.main;
+  let total = 0;
+  let current = 0;
+  const cursor = query.getCursor(view.state);
+  for (;;) {
+    const step = cursor.next();
+    if (step.done) break;
+    const match = step.value;
+    total += 1;
+    if (match.from === sel.from && match.to === sel.to) current = total;
+    if (total >= 9999) break;
+  }
+  matchTotal.value = total;
+  matchIndex.value = current;
+}
+
+function openFind(withReplace = false) {
+  const selected = selectedText();
+  if (selected && !selected.includes('\n')) findText.value = selected;
+  findOpen.value = true;
+  replaceOpen.value = withReplace;
+  applyQuery();
+  nextTick(() => {
+    findInput.value?.focus();
+    findInput.value?.select();
+  });
+}
+
+function closeFind() {
+  findOpen.value = false;
+  replaceOpen.value = false;
+  if (view) {
+    view.dispatch({ effects: setSearchQuery.of(new SearchQuery({ search: '' })) });
+    view.focus();
+  }
+  matchIndex.value = 0;
+  matchTotal.value = 0;
+}
+
+function goNext() {
+  if (!view) return;
+  applyQuery();
+  findNext(view);
+  refreshCount();
+}
+
+function goPrev() {
+  if (!view) return;
+  applyQuery();
+  findPrevious(view);
+  refreshCount();
+}
+
+function doReplace() {
+  if (!view) return;
+  applyQuery();
+  replaceNext(view);
+  refreshCount();
+}
+
+function doReplaceAll() {
+  if (!view) return;
+  applyQuery();
+  replaceAll(view);
+  refreshCount();
+}
+
+function toggleOpt(kind) {
+  if (kind === 'case') matchCase.value = !matchCase.value;
+  if (kind === 'word') wholeWord.value = !wholeWord.value;
+  if (kind === 'regex') useRegex.value = !useRegex.value;
+  applyQuery();
+}
+
+function onFindKey(event) {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    if (event.shiftKey) goPrev();
+    else goNext();
+  }
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    closeFind();
+  }
+}
+
+function onReplaceKey(event) {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    doReplace();
+  }
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    closeFind();
+  }
+}
+
 function placeMenu(x, y) {
   syncSelection();
   menu.value = {
     x: Math.max(8, Math.min(x, window.innerWidth - 200)),
-    y: Math.max(8, Math.min(y, window.innerHeight - 200)),
+    y: Math.max(8, Math.min(y, window.innerHeight - 240)),
   };
 }
 
@@ -199,20 +399,31 @@ function selectAll() {
 async function act(action) {
   closeMenu();
   if (action === 'format') await formatDocument();
+  if (action === 'find') openFind(false);
+  if (action === 'replace') openFind(true);
   if (action === 'cut') await cutSelection();
   if (action === 'copy') await copySelection();
   if (action === 'paste') await pasteClipboard();
   if (action === 'selectAll') selectAll();
-  view?.focus();
+  if (action !== 'find' && action !== 'replace') view?.focus();
 }
 
 function onKeydown(event) {
-  if (event.key === 'Escape') closeMenu();
-  if (event.key.toLowerCase() === 'f' && event.shiftKey && event.altKey) {
+  if (event.key === 'Escape') {
+    closeMenu();
+    if (findOpen.value) {
+      event.preventDefault();
+      closeFind();
+    }
+  }
+  if (event.key.toLowerCase() === 'f' && event.shiftKey && event.altKey && !(event.metaKey || event.ctrlKey)) {
     event.preventDefault();
     formatDocument();
   }
 }
+
+watch(findText, () => { if (findOpen.value) applyQuery(); });
+watch(replaceText, () => { if (findOpen.value) applyQuery(); });
 
 onMounted(() => {
   view = new EditorView({
@@ -226,7 +437,21 @@ onMounted(() => {
         history(),
         indentOnInput(),
         bracketMatching(),
+        search({ top: true }),
+        highlightSelectionMatches(),
         keymap.of([
+          { key: 'Mod-f', preventDefault: true, run: () => { openFind(false); return true; } },
+          { key: 'Mod-Alt-f', preventDefault: true, run: () => { openFind(true); return true; } },
+          { key: 'Mod-h', preventDefault: true, run: () => {
+            if (isMac) return false;
+            openFind(true);
+            return true;
+          } },
+          { key: 'F3', run: () => { goNext(); return true; } },
+          { key: 'Shift-F3', run: () => { goPrev(); return true; } },
+          { key: 'Mod-g', preventDefault: true, run: () => { goNext(); return true; } },
+          { key: 'Shift-Mod-g', preventDefault: true, run: () => { goPrev(); return true; } },
+          { key: 'Mod-d', preventDefault: true, run: selectNextOccurrence },
           indentWithTab,
           ...defaultKeymap,
           ...historyKeymap,
@@ -235,9 +460,13 @@ onMounted(() => {
         syntaxHighlighting(highlight),
         editorTheme,
         EditorView.updateListener.of((update) => {
-          if (update.selectionSet) syncSelection();
+          if (update.selectionSet) {
+            syncSelection();
+            if (findOpen.value) refreshCount();
+          }
           if (!update.docChanged || applying) return;
           emit('update:modelValue', update.state.doc.toString());
+          if (findOpen.value) refreshCount();
         }),
         EditorView.theme({
           '&': { height: '100%' },
@@ -272,5 +501,8 @@ watch(() => props.modelValue, (value) => {
 defineExpose({
   format: formatDocument,
   focus: () => view?.focus(),
+  openFind,
+  findNext: goNext,
+  findPrev: goPrev,
 });
 </script>

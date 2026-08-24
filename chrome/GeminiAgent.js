@@ -10,15 +10,34 @@ const INPUT_SELECTORS = [
 
 const SEND_SELECTORS = [
     'button.send-button',
+    'button.send-button.submit',
+    'button[aria-label="Send"]',
     'button[aria-label="Send message"]',
+    'button[aria-label="Gửi"]',
     'button[aria-label="Gửi tin nhắn"]',
     'button[aria-label*="Send" i]',
     'button[aria-label*="Gửi" i]',
     'button[type="submit"]',
 ];
 
+const INSERT_CHUNK = 800;
+
 function sleep(ms) {
     return new Promise((r) => setTimeout(r, ms));
+}
+
+function normalizePrompt(text) {
+    return String(text || '').replace(/\u200B/g, '').replace(/\s+/g, ' ').trim();
+}
+
+function composerMatches(got, want) {
+    const have = normalizePrompt(got);
+    const need = normalizePrompt(want);
+    if (!need) return true;
+    if (have.length < Math.max(24, Math.floor(need.length * 0.72))) return false;
+    const head = need.slice(0, Math.min(48, need.length));
+    const tail = need.slice(-Math.min(48, need.length));
+    return have.includes(head) && (need.length < 80 || have.includes(tail));
 }
 
 class GeminiAgent {
@@ -124,8 +143,91 @@ class GeminiAgent {
         }, INPUT_SELECTORS, SEND_SELECTORS);
     }
 
+    async focusComposer(page) {
+        const found = await this.findInput(page);
+        try {
+            await found.handle.click({ delay: 40 });
+        } catch {
+            await page.evaluate((inputSelectors) => {
+                const editors = [...document.querySelectorAll('div.ql-editor[contenteditable="true"]')]
+                    .filter((el) => el.offsetParent !== null);
+                const el = editors.find((item) => item.closest('rich-textarea, input-container, .text-input-field, [class*="input-area"]'))
+                    || editors[editors.length - 1]
+                    || document.querySelector(inputSelectors[0]);
+                el?.focus();
+            }, INPUT_SELECTORS);
+        }
+        await sleep(180);
+    }
+
+    async clearComposer(page) {
+        await page.evaluate((inputSelectors) => {
+            const editors = [...document.querySelectorAll('div.ql-editor[contenteditable="true"]')]
+                .filter((el) => el.offsetParent !== null);
+            const el = editors.find((item) => item.closest('rich-textarea, input-container, .text-input-field, [class*="input-area"]'))
+                || editors[editors.length - 1]
+                || document.querySelector(inputSelectors[0]);
+            if (!el) return;
+            el.focus();
+            if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
+                const proto = el.tagName === 'TEXTAREA'
+                    ? window.HTMLTextAreaElement.prototype
+                    : window.HTMLInputElement.prototype;
+                Object.getOwnPropertyDescriptor(proto, 'value')?.set?.call(el, '');
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                return;
+            }
+            const range = document.createRange();
+            range.selectNodeContents(el);
+            const selection = window.getSelection();
+            selection.removeAllRanges();
+            selection.addRange(range);
+            try { document.execCommand('delete'); } catch { el.innerHTML = '<p><br></p>'; }
+            el.classList.add('ql-blank');
+            el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'deleteContent' }));
+        }, INPUT_SELECTORS);
+        await sleep(120);
+    }
+
     async insertPrompt(page, text) {
-        const filled = await page.evaluate((value, inputSelectors) => {
+        const value = String(text || '');
+        await this.focusComposer(page);
+        await this.clearComposer(page);
+        let state = await this.readComposer(page);
+        if (state.chars > 12) {
+            await this.clearComposer(page);
+            state = await this.readComposer(page);
+        }
+
+        await this.insertDom(page, value);
+        state = await this.readComposer(page);
+        if (!composerMatches(state.text, value)) {
+            await this.clearComposer(page);
+            await this.insertDom(page, value);
+            state = await this.readComposer(page);
+        }
+        if (!composerMatches(state.text, value) && state.chars < Math.min(20, value.length)) {
+            await this.insertViaCdp(page, value);
+            state = await this.readComposer(page);
+        }
+
+        const filled = await this.waitForComposer(
+            page,
+            (s) => composerMatches(s.text, value),
+            Math.min(14000, 2800 + value.length / 6),
+        );
+        if (!composerMatches(filled.text, value)) {
+            throw new Error('Ô nhập Gemini bị dính chữ cũ / nhập thiếu. Click vào ô chat, xóa hết, rồi gửi lại.');
+        }
+
+        await sleep(Math.min(900, 220 + Math.floor(value.length / 60)));
+        await this.waitForComposer(page, (s) => s.sendEnabled && s.chars > 0, 6000);
+        await sleep(180);
+        return this.readComposer(page);
+    }
+
+    async insertDom(page, text) {
+        await page.evaluate((value, inputSelectors) => {
             const pickInput = () => {
                 const editors = [...document.querySelectorAll('div.ql-editor[contenteditable="true"]')]
                     .filter((el) => el.offsetParent !== null);
@@ -140,7 +242,7 @@ class GeminiAgent {
             };
 
             const el = pickInput();
-            if (!el) return { ok: false, reason: 'no-input' };
+            if (!el) return;
 
             const read = () => String(el.innerText || el.value || el.textContent || '').replace(/\u200B/g, '').trim();
 
@@ -148,11 +250,10 @@ class GeminiAgent {
                 const proto = el.tagName === 'TEXTAREA'
                     ? window.HTMLTextAreaElement.prototype
                     : window.HTMLInputElement.prototype;
-                const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
-                setter?.call(el, value);
+                Object.getOwnPropertyDescriptor(proto, 'value')?.set?.call(el, value);
                 el.dispatchEvent(new Event('input', { bubbles: true }));
                 el.dispatchEvent(new Event('change', { bubbles: true }));
-                return { ok: Boolean(read()), chars: read().length, via: 'textarea' };
+                return;
             }
 
             el.focus();
@@ -175,59 +276,44 @@ class GeminiAgent {
                 }
             }
 
-            if (!read()) {
-                const range = document.createRange();
-                range.selectNodeContents(el);
-                const selection = window.getSelection();
-                selection.removeAllRanges();
-                selection.addRange(range);
+            const range = document.createRange();
+            range.selectNodeContents(el);
+            const selection = window.getSelection();
+            selection.removeAllRanges();
+            selection.addRange(range);
+            try {
+                document.execCommand('insertText', false, value);
+            } catch {
+                // ignore
+            }
+            if (read().length < Math.min(24, value.length)) {
                 try {
-                    document.execCommand('insertText', false, value);
+                    const dt = new DataTransfer();
+                    dt.setData('text/plain', value);
+                    el.dispatchEvent(new ClipboardEvent('paste', {
+                        bubbles: true,
+                        cancelable: true,
+                        clipboardData: dt,
+                    }));
                 } catch {
-                    // fall through
+                    el.textContent = value;
                 }
             }
 
-            if (!read()) {
-                const escaped = value
-                    .replace(/&/g, '&amp;')
-                    .replace(/</g, '&lt;')
-                    .replace(/>/g, '&gt;');
-                el.innerHTML = escaped.split('\n').map((line) => `<p>${line || '<br>'}</p>`).join('');
-                el.classList.remove('ql-blank');
-            }
-
-            el.dispatchEvent(new InputEvent('beforeinput', {
-                bubbles: true,
-                cancelable: true,
-                inputType: 'insertFromPaste',
-                data: value,
-            }));
             el.dispatchEvent(new InputEvent('input', {
                 bubbles: true,
                 inputType: 'insertFromPaste',
-                data: value,
+                data: value.slice(0, 200),
             }));
-            el.dispatchEvent(new Event('change', { bubbles: true }));
-
-            return { ok: Boolean(read()), chars: read().length, via: 'dom' };
         }, text, INPUT_SELECTORS);
-
-        if (!filled.ok || filled.chars < 2) {
-            await this.insertViaCdp(page, text);
-        }
-
-        const state = await this.waitForComposer(page, (s) => s.chars > 0, 2500);
-        if (!state.chars) {
-            throw new Error('Ô nhập Gemini vẫn trống sau khi điền. Quill chưa nhận chữ — thử click vào ô chat Gemini một cái rồi gửi lại.');
-        }
-        return state;
     }
 
     async insertViaCdp(page, text) {
         let session;
         try {
             session = await page.createCDPSession();
+            await this.focusComposer(page);
+            await this.clearComposer(page);
             await page.evaluate((inputSelectors) => {
                 const editors = [...document.querySelectorAll('div.ql-editor[contenteditable="true"]')]
                     .filter((el) => el.offsetParent !== null);
@@ -243,7 +329,17 @@ class GeminiAgent {
                 selection.removeAllRanges();
                 selection.addRange(range);
             }, INPUT_SELECTORS);
-            await session.send('Input.insertText', { text });
+
+            const value = String(text || '');
+            if (value.length <= 12000) {
+                await session.send('Input.insertText', { text: value });
+            } else {
+                for (let i = 0; i < value.length; i += INSERT_CHUNK) {
+                    this.throwIfCancelled();
+                    await session.send('Input.insertText', { text: value.slice(i, i + INSERT_CHUNK) });
+                    await sleep(40);
+                }
+            }
         } catch {
             // Chrome window may reject CDP input; DOM path already ran.
         } finally {
@@ -262,13 +358,43 @@ class GeminiAgent {
         return last;
     }
 
-    async clickSend(page) {
-        const ready = await this.waitForComposer(page, (s) => s.sendEnabled, 3500);
-        if (!ready.chars) {
-            throw new Error('Không bấm được nút gửi Gemini vì ô nhập vẫn trống.');
+    composerLooksSent(state, beforeChars) {
+        if (!state) return false;
+        if (state.blank) return true;
+        if (state.chars < 8) return true;
+        return state.chars < Math.max(12, beforeChars * 0.12);
+    }
+
+    async findSendHandle(page) {
+        for (const selector of SEND_SELECTORS) {
+            const handles = await page.$$(selector);
+            for (const handle of handles) {
+                const ok = await handle.evaluate((btn) => {
+                    if (!btn) return false;
+                    if (btn.disabled || btn.getAttribute('aria-disabled') === 'true' || btn.classList.contains('disabled')) {
+                        return false;
+                    }
+                    const rect = btn.getBoundingClientRect();
+                    return rect.width > 8 && rect.height > 8;
+                }).catch(() => false);
+                if (ok) return handle;
+            }
+        }
+        return null;
+    }
+
+    async clickSendOnce(page) {
+        const handle = await this.findSendHandle(page);
+        if (handle) {
+            try {
+                await handle.click({ delay: 45 });
+                return true;
+            } catch {
+                // fall through to DOM click
+            }
         }
 
-        const clicked = await page.evaluate((sendSelectors) => {
+        return page.evaluate((sendSelectors) => {
             const isDisabled = (btn) => Boolean(
                 btn.disabled
                 || btn.getAttribute('disabled') !== null
@@ -285,27 +411,43 @@ class GeminiAgent {
             });
             const unique = [...new Set(candidates)];
             const enabled = unique.find((btn) => !isDisabled(btn)) || unique[0];
-            if (!enabled) return { ok: false, reason: 'no-button' };
+            if (!enabled) return false;
             enabled.click();
-            return { ok: true, label: enabled.getAttribute('aria-label') || enabled.className || '' };
+            return true;
         }, SEND_SELECTORS);
+    }
 
-        if (clicked.ok) {
-            await sleep(400);
-            return;
+    async clickSend(page) {
+        const before = await this.readComposer(page);
+        if (!before.chars) {
+            throw new Error('Không bấm được nút gửi Gemini vì ô nhập vẫn trống.');
         }
 
-        const pressed = await this.pressEnter(page);
-        if (pressed) {
-            await sleep(400);
-            return;
+        for (let attempt = 0; attempt < 4; attempt += 1) {
+            this.throwIfCancelled();
+            await this.waitForComposer(page, (s) => s.sendEnabled && s.chars > 0, 5000);
+            await sleep(220 + attempt * 180);
+            const clicked = await this.clickSendOnce(page);
+            if (!clicked && attempt === 0) {
+                await this.pressEnter(page);
+            }
+            const after = await this.waitForComposer(
+                page,
+                (s) => this.composerLooksSent(s, before.chars),
+                1600 + attempt * 400,
+            );
+            if (this.composerLooksSent(after, before.chars)) return;
+            await sleep(320 + attempt * 220);
         }
 
-        const after = await this.readComposer(page);
+        await this.pressEnter(page);
+        await sleep(700);
+        const leftover = await this.readComposer(page);
+        if (this.composerLooksSent(leftover, before.chars)) return;
         throw new Error(
-            after.hasSend
-                ? `Không bấm được nút gửi Gemini (nút "${after.sendLabel}" ${after.sendEnabled ? 'đã hiện' : 'vẫn tắt'}). Ô nhập đang có ${after.chars} ký tự.`
-                : `Không thấy nút gửi Gemini. Ô nhập đang có ${after.chars} ký tự.`,
+            leftover.hasSend
+                ? `Gemini treo ở ô nhập — ${leftover.chars} ký tự chưa gửi (nút "${leftover.sendLabel}" ${leftover.sendEnabled ? 'đã hiện' : 'vẫn tắt'}). Thử click ô chat rồi gửi lại.`
+                : `Không thấy nút gửi Gemini. Ô nhập đang có ${leftover.chars} ký tự.`,
         );
     }
 
@@ -428,9 +570,21 @@ class GeminiAgent {
         throw new Error('Gemini trả lời quá lâu hoặc không thấy kết quả.');
     }
 
+    async waitUntilIdle(page, timeout = 20000) {
+        const started = Date.now();
+        while (Date.now() - started < timeout) {
+            this.throwIfCancelled();
+            const reply = await this.readReplyState(page);
+            const composer = await this.readComposer(page);
+            if (!reply.generating && composer.hasInput) return;
+            await sleep(280);
+        }
+    }
+
     async ask(page, prompt) {
         this.cancelled = false;
         await this.ensureOnGemini(page);
+        await this.waitUntilIdle(page);
         const before = await this.readReplyState(page);
         await this.insertPrompt(page, prompt);
         await this.clickSend(page);

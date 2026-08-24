@@ -91,7 +91,7 @@ function printHelp() {
     console.log(`NowK ${pkg.version}
 
 Usage:
-  nowk start      Mở NowK IDE
+  nowk start      Mở NowK
   nowk help       Hiện lệnh
   nowk version    Hiện phiên bản
 

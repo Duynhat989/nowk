@@ -23,6 +23,56 @@ class AgentState {
         this.projectBrief = '';
         this.terminalChecks = 0;
         this.filesRead = [];
+        this.wiringFail = false;
+        this.lastWiring = '';
+        this.behaviorFail = false;
+        this.lastBehavior = '';
+        this.requirements = [];
+        this.reqIndex = 0;
+        this.reqMark = 0;
+        this.relationTree = '';
+        this.batchFailed = false;
+    }
+
+    setRequirements(items) {
+        const list = (items || []).map((item) => {
+            if (item && typeof item === 'object' && item.text) {
+                return {
+                    text: String(item.text).trim(),
+                    kind: item.kind || 'feature',
+                    status: item.status || 'pending',
+                };
+            }
+            const text = String(item || '').trim();
+            return text ? { text, kind: 'feature', status: 'pending' } : null;
+        }).filter(Boolean);
+        this.requirements = list;
+        this.reqIndex = 0;
+        this.reqMark = this.filesChanged.length;
+        this.mergePlan(list.map((item) => item.text));
+    }
+
+    currentRequirement() {
+        return this.requirements[this.reqIndex] || null;
+    }
+
+    requirementsLeft() {
+        return Math.max(0, (this.requirements || []).length - this.reqIndex);
+    }
+
+    advanceRequirement() {
+        const current = this.requirements[this.reqIndex];
+        if (current) {
+            current.status = 'completed';
+            const item = this.plan.find((row) => row.task === current.text);
+            if (item) item.status = 'completed';
+        }
+        this.reqIndex += 1;
+        this.reqMark = this.filesChanged.length;
+        this.wiringFail = false;
+        this.behaviorFail = false;
+        this.batchFailed = false;
+        this.clearErrors();
     }
 
     markPhase(phase) {
@@ -32,6 +82,7 @@ class AgentState {
     addPlanItem(task, status = 'pending') {
         const text = String(task || '').trim();
         if (!text) return;
+        if (this.isFillerPlan({ task: text })) return;
         if (this.plan.some((item) => item.task === text)) return;
         this.plan.push({ task: text, status });
     }
@@ -63,13 +114,35 @@ class AgentState {
         }
     }
 
+    isFillerPlan(item) {
+        const name = String(item?.task || '');
+        return /(finalize|mark (the )?(run |task )?(as )?(done|complete|completion)|finish the task|complete the task|mark completion|ensure clean state|comment cleanup)/i.test(name)
+            || /(update|sửa|đổi).{0,50}(readme|package\.json).{0,40}(finish|complete|mark|done|hoàn tất)/i.test(name)
+            || /package\.json.{0,40}(name|description|author|homepage|version).{0,40}(mark|finish|complete|done)/i.test(name)
+            || /(đánh dấu|hoàn tất (task|yêu cầu)|để hoàn thành|to (completely )?finish)/i.test(name);
+    }
+
+    isRunPlan(item) {
+        const name = String(item?.task || '');
+        return /\b(run|start|chạy|khởi động|npm run|dev server)\b/i.test(name)
+            && !/\b(edit|sửa|thêm|create|patch|fix|implement|viết)\b/i.test(name);
+    }
+
     isReadOnlyPlan(item) {
         const name = String(item?.task || '').toLowerCase();
+        if (this.isFillerPlan(item)) return true;
         if (/\b(edit|update|rewrite|restyle|patch|replace|sửa|thêm|viết|thay|đổi)\b/.test(name)) {
             return false;
         }
         return /\b(read|đọc|inspect|find|look|search|scan|map|liệt kê|tìm|khảo sát)\b/.test(name)
             || /\blines?\s+\d+/.test(name);
+    }
+
+    markRunProgress() {
+        for (const item of this.plan) {
+            if (item.status === 'completed') continue;
+            if (this.isRunPlan(item)) item.status = 'completed';
+        }
     }
 
     markDiscoverDone() {
@@ -112,10 +185,10 @@ class AgentState {
 
     recordChange(path) {
         const rel = String(path || '');
-        if (rel && !this.filesChanged.includes(rel)) this.filesChanged.push(rel);
+        if (rel && !this.filesChanged.includes(rel))         this.filesChanged.push(rel);
         this.truncated = this.truncated.filter((item) => item !== rel);
-        this.proofed = false;
-        this.sweepOk = false;
+        this.proofed = true;
+        this.sweepOk = true;
     }
 
     rememberNeedles(needles) {

@@ -11,4 +11,8 @@
 !dist-ui/**
 !index.js
 !preload.js
+!build/
+!build/icon.png
+!build/icon.icns
+!build/icon.ico
 !README.md

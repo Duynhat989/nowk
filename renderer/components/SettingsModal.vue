@@ -1,6 +1,6 @@
 <template>
   <div class="modal-overlay open" @click.self="$emit('close')">
-    <div class="modal modal-lg">
+    <div class="modal modal-lg settings-modal">
       <div class="modal-header">
         <div>
           <h2>{{ t('setup.title') }}</h2>
@@ -79,6 +79,7 @@
           </label>
           <label class="field">
             <span>{{ t('setup.chromePath') }}</span>
+            <p class="hint">{{ t('setup.chromePathPlaceholder') }}</p>
             <div class="input-group">
               <input v-model="form.chromePath" type="text" :placeholder="t('setup.chromePathPlaceholder')">
               <button class="btn btn-secondary" type="button" @click="pickChromePath">{{ t('common.choose') }}</button>
@@ -88,6 +89,7 @@
       </div>
 
       <div class="modal-footer">
+        <button class="btn btn-ghost" type="button" @click="logout">{{ t('auth.logout') }}</button>
         <button class="btn btn-ghost" type="button" @click="$emit('close')">{{ t('common.cancel') }}</button>
         <button class="btn btn-primary" type="button" @click="save">{{ t('setup.saveSettings') }}</button>
       </div>
@@ -104,7 +106,7 @@ const props = defineProps({
   settings: { type: Object, default: () => ({}) },
 });
 
-const emit = defineEmits(['close', 'refresh']);
+const emit = defineEmits(['close', 'refresh', 'logout']);
 
 const toast = inject('toast');
 const { t, locale } = useI18n();
@@ -147,6 +149,11 @@ async function pickChromePath() {
 
 async function openDataPath() {
   await window.api.openFolder(form.dataPath || props.settings.profilesRoot);
+}
+
+async function logout() {
+  emit('logout');
+  emit('close');
 }
 
 async function save() {

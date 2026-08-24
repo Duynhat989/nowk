@@ -21,7 +21,7 @@
     "devOff": "Tắt Dev"
   },
   "ide": {
-    "title": "NowK IDE",
+    "title": "NowK",
     "profiles": "Profiles",
     "settings": "Cài đặt",
     "openFolder": "Mở folder",
@@ -36,7 +36,7 @@
     "resizePanel": "Kéo để đổi độ rộng",
     "saveFile": "Lưu file",
     "files": "Files",
-    "welcomeTitle": "NowK IDE",
+    "welcomeTitle": "NowK",
     "welcomeBody": "Mở folder dự án để sửa code. Profile trình duyệt nằm riêng trong popup.",
     "openProfiles": "Mở / Lưu profile",
     "emptyFolder": "Chưa có file. Tạo file mới để bắt đầu.",
@@ -58,7 +58,26 @@
     "copy": "Sao chép",
     "paste": "Dán",
     "selectAll": "Chọn tất cả",
-    "untitled": "chưa đặt tên"
+    "untitled": "chưa đặt tên",
+    "preview": "Xem",
+    "source": "Mã nguồn",
+    "web": "Web",
+    "openUrl": "https://",
+    "webBack": "Quay lại",
+    "webForward": "Tiến tới",
+    "webReload": "Tải lại",
+    "openExternal": "Mở trình duyệt",
+    "find": "Tìm",
+    "replace": "Thay thế",
+    "replaceAll": "Thay tất cả",
+    "findNext": "Kết quả sau",
+    "findPrev": "Kết quả trước",
+    "matchCase": "Phân biệt hoa thường",
+    "wholeWord": "Cả từ",
+    "useRegex": "Biểu thức chính quy",
+    "noResults": "Không có kết quả",
+    "invalidRegex": "Regex không hợp lệ",
+    "matchCount": "{current} / {total}"
   },
   "terminal": {
     "title": "Terminal",
@@ -76,11 +95,63 @@
   "welcome": {
     "title": "NowK",
     "slogan": "Chọn project để bắt đầu",
+    "openProject": "Open project",
+    "cloneRepo": "Clone repo",
+    "cloneTitle": "Clone repository",
+    "cloneHint": "Dán URL git và chọn chỗ lưu.",
+    "cloneUrl": "URL repository",
+    "cloneUrlPh": "https://github.com/org/repo.git",
+    "clone": "Clone",
+    "cloning": "Đang clone…",
+    "needUrl": "Nhập URL git.",
+    "cloneFailed": "Không clone được repository.",
+    "viewAll": "Xem tất cả ({n})",
+    "viewLess": "Thu gọn",
     "search": "Tìm project đã mở...",
     "recent": "Project gần đây",
     "empty": "Chưa có project nào. Mở một folder để bắt đầu.",
     "noMatch": "Không tìm thấy project phù hợp.",
     "openFolder": "Mở folder…",
+    "newProject": "Tạo project mới",
+    "newTitle": "Project mới",
+    "newHint": "Chọn chỗ lưu, đặt tên folder, rồi chọn mẫu.",
+    "folderName": "Tên folder",
+    "folderNamePh": "my-app",
+    "saveTo": "Lưu tại",
+    "saveToPh": "Chọn thư mục cha",
+    "kind": "Kiểu dự án",
+    "create": "Tạo project",
+    "creating": "Đang tạo…",
+    "needName": "Nhập tên folder.",
+    "needParent": "Chọn chỗ lưu.",
+    "createFailed": "Không tạo được project.",
+    "kinds": {
+      "vue3": {
+        "title": "Web FE · Vue 3",
+        "blurb": "Vite + script setup",
+        "prompt": "Hoàn thiện Vue 3 script setup: layout, Home, npm run dev."
+      },
+      "node": {
+        "title": "Node.js",
+        "blurb": "Backend / CLI",
+        "prompt": "Hoàn thiện Node.js: start script và API hoặc CLI."
+      },
+      "electron": {
+        "title": "Window app · Electron",
+        "blurb": "Ứng dụng máy tính",
+        "prompt": "Hoàn thiện Electron: cửa sổ, preload, nút có hành vi."
+      },
+      "extension": {
+        "title": "Extension",
+        "blurb": "Chrome Manifest V3",
+        "prompt": "Hoàn thiện extension MV3: popup và hành động trên tab."
+      },
+      "html": {
+        "title": "HTML / CSS / JS",
+        "blurb": "Trang tĩnh",
+        "prompt": "Hoàn thiện HTML/CSS/JS: layout đẹp, responsive."
+      }
+    },
     "remove": "Xóa khỏi danh sách"
   },
   "chat": {
@@ -114,6 +185,9 @@
     "workingDelete": "Đang xóa {name}",
     "workingMkdir": "Đang tạo thư mục {name}",
     "workingSearch": "Đang tìm {query}",
+    "workingRetrieve": "Đang retrieve {query}",
+    "workingBrowser": "Đang mở {name}",
+    "workingShot": "Đang chụp màn hình",
     "workingList": "Đang liệt kê {name}",
     "workingGit": "Đang đọc git status",
     "workingRun": "Đang chạy {command}",
@@ -133,6 +207,14 @@
     "terminalFailed": "terminal báo lỗi",
     "terminalReview": "Terminal {reason}: `{command}` (exit {code}).\n\nLog:\n```\n{log}\n```\n\nHãy đọc log, sửa file nếu cần, rồi chạy lại lệnh.",
     "planTitle": "Kế hoạch",
+    "kindFeature": "Tính năng",
+    "kindBugfix": "Sửa lỗi",
+    "kindUpdate": "Cập nhật",
+    "kindRefactor": "Refactor",
+    "kindStyle": "Giao diện",
+    "kindRemove": "Xóa",
+    "kindRun": "Chạy",
+    "kindInvestigate": "Khảo sát",
     "checksTitle": "Đã kiểm tra",
     "auditCreated": "Đã tạo và có trên disk",
     "auditEdited": "Đã sửa và đọc lại khớp",
@@ -254,5 +336,21 @@
     "extensions": "Extensions",
     "addExtension": "Thêm extension",
     "noExtensions": "Chưa có extension"
+  },
+  "auth": {
+    "subtitle": "Đăng nhập tài khoản Nano để dùng NowK.",
+    "continueNano": "Tiếp tục với Nano",
+    "checkingSession": "Đang kiểm tra phiên…",
+    "waitingTitle": "Đang chờ đăng nhập",
+    "waitingHint": "Hoàn tất đăng nhập trên trình duyệt, cửa sổ này sẽ tự tiếp tục.",
+    "back": "Quay lại",
+    "openSignInAgain": "Mở trang đăng nhập lại",
+    "footer": "Token chỉ lưu trên máy này.",
+    "tokenInvalid": "Phiên không hợp lệ. Hãy đăng nhập lại.",
+    "serverUnreachable": "Không bắt đầu được đăng nhập. Thử lại.",
+    "logout": "Đăng xuất",
+    "balance": "Số dư Nano",
+    "balanceShort": "{n}",
+    "sessionExpired": "Phiên đã hết hạn. Hãy đăng nhập lại."
   }
 }

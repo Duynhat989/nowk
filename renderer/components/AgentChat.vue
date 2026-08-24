@@ -42,7 +42,8 @@
       </button>
       <ol v-if="planOpen">
         <li v-for="(item, idx) in plan" :key="idx" :class="item.status">
-          <span>{{ item.status === 'completed' ? '✓' : '○' }}</span>
+          <span>{{ item.status === 'completed' ? '✓' : item.status === 'in_progress' ? '●' : '○' }}</span>
+          <span v-if="item.kindLabel || item.kind" class="agent-plan-kind" :class="item.kind">{{ item.kindLabel || item.kind }}</span>
           {{ item.task }}
         </li>
       </ol>
@@ -66,11 +67,11 @@
         <div v-else-if="block.role === 'assistant'" class="agent-assistant">{{ block.text }}</div>
 
         <div v-else-if="block.role === 'activity'" class="agent-activity">
-          <button type="button" class="agent-activity-head" @click="toggleActivity(block.id)">
+          <button type="button" class="agent-activity-head" @click="toggleActivity(block.id, idx === timeline.length - 1)">
             <span class="agent-activity-title">{{ activityTitle(block, idx === timeline.length - 1) }}</span>
-            <span class="agent-activity-chevron" :class="{ open: isOpen(block.id) }">▾</span>
+            <span class="agent-activity-chevron" :class="{ open: isOpen(block.id, idx === timeline.length - 1) }">▾</span>
           </button>
-          <div v-if="isOpen(block.id)" class="agent-activity-body">
+          <div v-if="isOpen(block.id, idx === timeline.length - 1)" class="agent-activity-body">
             <template v-for="item in block.items" :key="item.id">
               <div v-if="item.kind === 'thought'" class="agent-thought" :class="{ live: item.live }">
                 {{ thoughtLabel(item) }}
@@ -95,31 +96,21 @@
                 </div>
               </div>
 
-              <button
-                v-else-if="item.kind === 'write'"
-                type="button"
-                class="agent-filepill"
-                @click="toggleRow(item.id)"
-              >
-                <FileIcon :name="baseName(item.path)" type="file" />
-                <span class="agent-filepill-name">{{ baseName(item.path) || item.tool }}</span>
-                <span class="agent-filepill-verb">{{ item.tool }}</span>
-              </button>
-
-              <div v-else-if="item.kind === 'diff'" class="agent-diff">
+              <div v-else-if="item.kind === 'write' || item.kind === 'diff'" class="agent-diff">
                 <button type="button" class="agent-diff-head" @click="toggleRow(item.id)">
-                  <span class="agent-diff-chevron" :class="{ open: isRowOpen(item.id, item.lines?.length <= 24) }">▾</span>
+                  <span class="agent-diff-chevron" :class="{ open: isRowOpen(item.id, Boolean(unifiedLines(item).length)) }">▾</span>
                   <FileIcon :name="baseName(item.path)" type="file" />
-                  <span class="agent-diff-name">{{ baseName(item.path) || item.path }}</span>
+                  <span class="agent-diff-name">{{ baseName(item.path) || item.path || item.tool }}</span>
+                  <span class="agent-filepill-verb">{{ item.tool || 'Edit' }}</span>
                   <span v-if="diffStats(item.lines).add" class="agent-diff-add">+{{ diffStats(item.lines).add }}</span>
                   <span v-if="diffStats(item.lines).del" class="agent-diff-del">-{{ diffStats(item.lines).del }}</span>
                 </button>
-                <pre v-if="isRowOpen(item.id, item.lines?.length <= 24)" class="agent-diff-body"><div
-                  v-for="(line, idx) in item.lines"
+                <pre v-if="isRowOpen(item.id, Boolean(unifiedLines(item).length))" class="agent-diff-body"><div
+                  v-for="(line, idx) in unifiedLines(item)"
                   :key="idx"
                   class="agent-diff-line"
                   :class="line.type"
-                ><span class="agent-diff-gutter">{{ lineNo(item.lines, idx) }}</span><span class="agent-diff-mark">{{ line.type === 'add' ? '+' : line.type === 'del' ? '-' : ' ' }}</span><span>{{ line.text }}</span></div></pre>
+                ><span class="agent-diff-mark">{{ line.type === 'add' ? '+' : line.type === 'del' ? '-' : ' ' }}</span><span>{{ line.text }}</span></div></pre>
               </div>
 
               <div v-else-if="item.kind === 'check'" class="agent-check" :class="item.ok ? 'ok' : 'bad'">
@@ -203,7 +194,7 @@ const sessions = ref([createSession()]);
 const activeId = ref(sessions.value[0].id);
 const listEl = ref(null);
 const runningId = ref('');
-const expanded = ref(new Set());
+const expanded = ref(new Map());
 const rowState = ref(new Map());
 const busy = computed(() => Boolean(runningId.value));
 const currentRunning = computed(() => runningId.value === activeId.value);
@@ -285,14 +276,14 @@ function activityKind(item) {
   return 'thought';
 }
 
-function isOpen(id) {
-  return expanded.value.has(id);
+function isOpen(id, isLast = false) {
+  if (expanded.value.has(id)) return expanded.value.get(id);
+  return isLast;
 }
 
-function toggleActivity(id) {
-  const next = new Set(expanded.value);
-  if (next.has(id)) next.delete(id);
-  else next.add(id);
+function toggleActivity(id, isLast = false) {
+  const next = new Map(expanded.value);
+  next.set(id, !isOpen(id, isLast));
   expanded.value = next;
 }
 
@@ -362,6 +353,9 @@ function formatWorking(data) {
     case 'delete_file': return t('chat.workingDelete', { name: name || 'file' });
     case 'mkdir': return t('chat.workingMkdir', { name: name || 'folder' });
     case 'search_code': return t('chat.workingSearch', { query: query || name || 'code' });
+    case 'retrieve': return t('chat.workingRetrieve', { query: query || name || 'context' });
+    case 'browser_open': return t('chat.workingBrowser', { name: name || query || 'website' });
+    case 'screenshot': return t('chat.workingShot');
     case 'list_files': return t('chat.workingList', { name: name || '/' });
     case 'git_status':
     case 'git_diff':
@@ -397,6 +391,23 @@ function diffStats(lines) {
     if (line.type === 'del') del += 1;
   }
   return { add, del };
+}
+
+function unifiedLines(item) {
+  if (item.lines?.length) return item.lines;
+  const oldText = String(item.old || '');
+  const newText = String(item.new || '');
+  if (!oldText && newText) {
+    return newText.split('\n').map((text) => ({ type: 'add', text }));
+  }
+  if (oldText && !newText) {
+    return oldText.split('\n').map((text) => ({ type: 'del', text }));
+  }
+  if (!oldText && !newText) return [];
+  return [
+    ...oldText.split('\n').map((text) => ({ type: 'del', text })),
+    ...newText.split('\n').map((text) => ({ type: 'add', text })),
+  ];
 }
 
 function lineNo(_lines, idx) {
@@ -518,6 +529,7 @@ function onProgress(data) {
   }
   if (data?.type === 'plan' && Array.isArray(data.plan)) {
     session.plan = data.plan;
+    if (data.plan.length > 1 || data.plan.some((item) => item.kind)) session.planOpen = true;
     return;
   }
   if (data?.type === 'audit') {
@@ -551,7 +563,15 @@ function onProgress(data) {
   if (data?.type === 'tool') {
     const last = session.messages[session.messages.length - 1];
     const label = data.path || data.command || data.query || data.message || '';
-    if (last?.role === 'tool' && last.tool === toolLabel(data.tool) && last.path === (data.path || label)) return;
+    if (last?.role === 'tool' && last.tool === toolLabel(data.tool) && last.path === (data.path || label)) {
+      last.ok = data.ok;
+      last.error = data.error || '';
+      if (data.lines?.length) last.lines = data.lines;
+      if (data.old) last.old = data.old;
+      if (data.new) last.new = data.new;
+      if (session.id === activeId.value) scrollBottom();
+      return;
+    }
     if (last?.role === 'status') {
       const sec = Math.max(0, Math.round((Date.now() - (last.at || Date.now())) / 1000));
       last.role = 'step';
@@ -564,11 +584,31 @@ function onProgress(data) {
       command: data.command || '',
       query: data.query || '',
       range: rangeLabel(data.start, data.end),
+      old: data.old || '',
+      new: data.new || '',
+      lines: data.lines || [],
     }, session);
     return;
   }
-  if (data?.type === 'diff' && data.lines?.length) {
-    push('diff', '', { path: data.path || data.message, lines: data.lines }, session);
+  if (data?.type === 'diff' && (data.lines?.length || data.old || data.new)) {
+    const match = [...session.messages].reverse().find((item) => (
+      item.role === 'tool'
+      && WRITE.has(item.tool)
+      && (!data.path || item.path === data.path)
+    ));
+    if (match) {
+      match.lines = data.lines?.length ? data.lines : match.lines;
+      if (data.old) match.old = data.old;
+      if (data.new) match.new = data.new;
+      if (session.id === activeId.value) scrollBottom();
+      return;
+    }
+    push('diff', '', {
+      path: data.path || data.message,
+      lines: data.lines || [],
+      old: data.old || '',
+      new: data.new || '',
+    }, session);
     return;
   }
   if (data?.type === 'step' && data.message) {
@@ -690,7 +730,7 @@ async function sendText(raw) {
   await scrollBottom();
 }
 
-defineExpose({ reviewFromTerminal });
+defineExpose({ reviewFromTerminal, setDraft: (text) => { draft.value = String(text || ''); } });
 
 onMounted(() => {
   unsub = window.api.onAgentProgress?.(onProgress);

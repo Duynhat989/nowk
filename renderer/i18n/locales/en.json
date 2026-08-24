@@ -21,7 +21,7 @@
     "devOff": "Dev Off"
   },
   "ide": {
-    "title": "NowK IDE",
+    "title": "NowK",
     "profiles": "Profiles",
     "settings": "Settings",
     "openFolder": "Open folder",
@@ -36,7 +36,7 @@
     "resizePanel": "Drag to resize",
     "saveFile": "Save file",
     "files": "Files",
-    "welcomeTitle": "NowK IDE",
+    "welcomeTitle": "NowK",
     "welcomeBody": "Open a project folder to edit code. Browser profiles stay in their own popup.",
     "openProfiles": "Open / Save profiles",
     "emptyFolder": "No files yet. Create a file to start.",
@@ -58,7 +58,26 @@
     "copy": "Copy",
     "paste": "Paste",
     "selectAll": "Select all",
-    "untitled": "untitled"
+    "untitled": "untitled",
+    "preview": "Preview",
+    "source": "Source",
+    "web": "Web",
+    "openUrl": "https://",
+    "webBack": "Back",
+    "webForward": "Forward",
+    "webReload": "Reload",
+    "openExternal": "Open in browser",
+    "find": "Find",
+    "replace": "Replace",
+    "replaceAll": "Replace all",
+    "findNext": "Find next",
+    "findPrev": "Find previous",
+    "matchCase": "Match case",
+    "wholeWord": "Match whole word",
+    "useRegex": "Use regular expression",
+    "noResults": "No results",
+    "invalidRegex": "Invalid regex",
+    "matchCount": "{current} of {total}"
   },
   "terminal": {
     "title": "Terminal",
@@ -76,11 +95,63 @@
   "welcome": {
     "title": "NowK",
     "slogan": "Pick a project to get started",
+    "openProject": "Open project",
+    "cloneRepo": "Clone repo",
+    "cloneTitle": "Clone repository",
+    "cloneHint": "Paste a git URL and choose where to save it.",
+    "cloneUrl": "Repository URL",
+    "cloneUrlPh": "https://github.com/org/repo.git",
+    "clone": "Clone",
+    "cloning": "Cloning…",
+    "needUrl": "Enter a git URL.",
+    "cloneFailed": "Could not clone the repository.",
+    "viewAll": "View all ({n})",
+    "viewLess": "Show less",
     "search": "Search recent projects...",
     "recent": "Recent projects",
     "empty": "No recent projects yet. Open a folder to start.",
     "noMatch": "No matching projects.",
     "openFolder": "Open folder…",
+    "newProject": "New project",
+    "newTitle": "New project",
+    "newHint": "Pick a save location, name the folder, then choose a template.",
+    "folderName": "Folder name",
+    "folderNamePh": "my-app",
+    "saveTo": "Save in",
+    "saveToPh": "Choose parent folder",
+    "kind": "Project type",
+    "create": "Create project",
+    "creating": "Creating…",
+    "needName": "Enter a folder name.",
+    "needParent": "Choose where to save.",
+    "createFailed": "Could not create the project.",
+    "kinds": {
+      "vue3": {
+        "title": "Web FE · Vue 3",
+        "blurb": "Vite + script setup",
+        "prompt": "Finish this Vue 3 script-setup app: layout, Home, npm run dev."
+      },
+      "node": {
+        "title": "Node.js",
+        "blurb": "Backend / CLI",
+        "prompt": "Finish this Node.js app: start script and a useful API or CLI."
+      },
+      "electron": {
+        "title": "Window app · Electron",
+        "blurb": "Desktop app",
+        "prompt": "Finish this Electron app: window, preload, working buttons."
+      },
+      "extension": {
+        "title": "Extension",
+        "blurb": "Chrome Manifest V3",
+        "prompt": "Finish this MV3 extension: popup and a tab action."
+      },
+      "html": {
+        "title": "HTML / CSS / JS",
+        "blurb": "Static page",
+        "prompt": "Finish this static page: polished responsive layout."
+      }
+    },
     "remove": "Remove from list"
   },
   "chat": {
@@ -114,6 +185,9 @@
     "workingDelete": "Deleting {name}",
     "workingMkdir": "Creating folder {name}",
     "workingSearch": "Searching {query}",
+    "workingRetrieve": "Retrieving {query}",
+    "workingBrowser": "Opening {name}",
+    "workingShot": "Capturing screenshot",
     "workingList": "Listing {name}",
     "workingGit": "Checking git status",
     "workingRun": "Running {command}",
@@ -133,6 +207,14 @@
     "terminalFailed": "the terminal reported an error",
     "terminalReview": "Terminal {reason}: `{command}` (exit {code}).\n\nLog:\n```\n{log}\n```\n\nRead the log, fix files if needed, then rerun the command.",
     "planTitle": "Plan",
+    "kindFeature": "Feature",
+    "kindBugfix": "Bugfix",
+    "kindUpdate": "Update",
+    "kindRefactor": "Refactor",
+    "kindStyle": "Style",
+    "kindRemove": "Remove",
+    "kindRun": "Run",
+    "kindInvestigate": "Investigate",
     "checksTitle": "Verified",
     "auditCreated": "Created and present on disk",
     "auditEdited": "Edited and re-read matches",
@@ -254,5 +336,21 @@
     "extensions": "Extensions",
     "addExtension": "Add extension",
     "noExtensions": "No extensions"
+  },
+  "auth": {
+    "subtitle": "Sign in with your Nano account to use NowK.",
+    "continueNano": "Continue with Nano",
+    "checkingSession": "Checking session…",
+    "waitingTitle": "Waiting for sign-in",
+    "waitingHint": "Finish signing in in the browser, then this window will continue automatically.",
+    "back": "Back",
+    "openSignInAgain": "Open sign-in again",
+    "footer": "Token is stored only on this device.",
+    "tokenInvalid": "That session is invalid. Sign in again.",
+    "serverUnreachable": "Could not start sign-in. Try again.",
+    "logout": "Sign out",
+    "balance": "Nano balance",
+    "balanceShort": "{n}",
+    "sessionExpired": "Session expired. Please sign in again."
   }
 }

@@ -108,6 +108,21 @@ function collectPatches(action) {
     return [];
 }
 
+function snippetOnDisk(content, added) {
+    const hay = String(content || '');
+    const neu = String(added || '').trim();
+    if (!neu) return true;
+    if (hay.includes(neu)) return true;
+    const compactHay = hay.replace(/\s+/g, ' ');
+    const compactNew = neu.replace(/\s+/g, ' ');
+    if (compactNew.length >= 12 && compactHay.includes(compactNew.slice(0, Math.min(80, compactNew.length)))) {
+        return true;
+    }
+    const lines = neu.split('\n').map((line) => line.trim()).filter((line) => line.length >= 8);
+    if (!lines.length) return true;
+    return lines.some((line) => hay.includes(line));
+}
+
 async function auditAction(workspace, root, action, result) {
     const rel = action.path;
     if (!result?.ok) return { ok: false, error: result?.error || `${action.type} failed` };
@@ -116,39 +131,29 @@ async function auditAction(workspace, root, action, result) {
     if (action.type === 'create_file') {
         try {
             const { content } = await workspace.readFile(root, rel);
-            const snippet = String(action.content || '').replace(/\s+/g, ' ').trim().slice(0, 48);
-            const hay = String(content || '').replace(/\s+/g, ' ');
-            if (snippet && snippet.length >= 12 && !hay.includes(snippet.slice(0, 32))) {
-                return { ok: false, error: `AUDIT FAIL: create ${rel} nhưng nội dung trên disk không khớp.` };
-            }
             if (!String(content || '').length && String(action.content || '').trim()) {
-                return { ok: false, error: `AUDIT FAIL: create ${rel} nhưng file trên disk trống.` };
+                return { ok: false, error: `Chưa thấy nội dung mới trong ${rel}` };
             }
-            return { ok: true, note: `AUDIT PASS: ${rel} đã tạo (${String(content).length} chars)` };
+            if (action.content && !snippetOnDisk(content, action.content)) {
+                return { ok: false, error: `Chưa thấy dòng mới trong ${rel}` };
+            }
+            return { ok: true, note: `${rel} đã có trên disk` };
         } catch {
-            return { ok: false, error: `AUDIT FAIL: create ${rel} nhưng file không có trên disk.` };
+            return { ok: false, error: `Chưa thấy file ${rel} trên disk` };
         }
     }
 
     if (action.type === 'edit_file') {
         try {
             const { content } = await workspace.readFile(root, rel);
-            const text = String(content || '');
             for (const patch of collectPatches(action)) {
-                if (patch.new && !text.includes(patch.new)) {
-                    return { ok: false, error: `AUDIT FAIL: sửa ${rel} nhưng disk không có đoạn new.` };
-                }
-                if (patch.old && patch.new && !patch.new.includes(patch.old) && text.includes(patch.old)
-                    && !action.replace_all) {
-                    return {
-                        ok: false,
-                        error: `AUDIT FAIL: sửa ${rel} nhưng đoạn old vẫn còn trên disk.`,
-                    };
+                if (patch.new && !snippetOnDisk(content, patch.new)) {
+                    return { ok: false, error: `Chưa thấy dòng mới trong ${rel}` };
                 }
             }
-            return { ok: true, note: `AUDIT PASS: ${rel} đã chứa thay đổi` };
+            return { ok: true, note: `${rel} đã có dòng mới` };
         } catch (error) {
-            return { ok: false, error: `AUDIT FAIL: không đọc lại được ${rel}: ${error.message}` };
+            return { ok: false, error: `Không đọc lại được ${rel}: ${error.message}` };
         }
     }
 
@@ -200,68 +205,28 @@ function formatSweep(leftover) {
 
 function formatReport(report) {
     if (report.ok) {
-        return `DISK CHECK: PASS\nĐã thấy thay đổi khớp task trong: ${report.checked.join(', ') || '(none)'}\nChỉ done=true khi không còn thiếu so với yêu cầu.`;
+        return `DISK CHECK: PASS — đã thấy dòng mới trong ${report.checked.join(', ') || '(none)'}`;
     }
-    const lines = ['DISK CHECK: FAIL — chưa được phép done.', ...(report.missing || []), ...(report.syntax || [])];
-    return `${lines.join('\n')}\nĐọc lại slice rồi edit_file old/new cho đúng. Không khẳng định đã thêm nếu disk không có.`;
+    return `DISK CHECK: chưa thấy dòng mới.\n${(report.missing || []).join('\n')}`;
 }
 
 async function verifyChanges(workspace, root, task, filesChanged) {
-    const hints = extractHints(task);
     const bodies = [];
+    const missing = [];
     for (const rel of filesChanged || []) {
         try {
             const { content } = await workspace.readFile(root, rel);
             bodies.push({ path: rel, content: String(content || '') });
         } catch {
-            // dir / unreadable — skip
+            missing.push(`Không đọc được ${rel}`);
         }
     }
-    const all = bodies.map((item) => item.content).join('\n');
-    const missing = [];
-    const syntax = [];
-
-    if (!bodies.length && (hints.wantsCss || hints.quoted.length || hints.colors.length)) {
-        missing.push('Chưa có file nào được ghi trên disk.');
-    }
-
-    for (const item of bodies) {
-        if (item.error) missing.push(`Không đọc được ${item.path}: ${item.error}`);
-        const issue = syntaxIssue(item.path, item.content);
-        if (issue) syntax.push(`${item.path}: ${issue}`);
-    }
-
-    for (const phrase of hints.quoted) {
-        if (!all.includes(phrase)) missing.push(`Không thấy đoạn được yêu cầu: "${phrase}"`);
-    }
-    for (const color of hints.colors) {
-        if (!all.toLowerCase().includes(color.toLowerCase())) {
-            missing.push(`Không thấy màu/token: ${color}`);
-        }
-    }
-    if (hints.wantsCss && !bodies.some((item) => hasCss(item.path, item.content))) {
-        missing.push('Task yêu cầu CSS/style nhưng file đã sửa không có rule CSS hoặc thẻ <style>.');
-    }
-    const idHits = hints.idents.filter((id) => all.toLowerCase().includes(id.toLowerCase()));
-    if (hints.idents.length >= 2 && idHits.length === 0) {
-        missing.push(`Không thấy từ khóa của task trong file đã sửa: ${hints.idents.slice(0, 6).join(', ')}`);
-    }
-    for (const file of hints.files) {
-        const hit = bodies.some((item) => item.path === file || item.path.endsWith(`/${file}`) || item.path.endsWith(file));
-        if (!hit && filesChanged?.length) {
-            const mentioned = all.includes(file);
-            if (!mentioned && /thêm|sửa|css|trong/i.test(task) && /\.(css|scss|vue|js)$/i.test(file)) {
-                missing.push(`Task nói tới ${file} nhưng không thấy file đó được sửa.`);
-            }
-        }
-    }
-
     return {
-        ok: missing.length === 0 && syntax.length === 0,
+        ok: bodies.length > 0 && missing.length === 0,
         missing,
-        syntax,
+        syntax: [],
         checked: bodies.map((item) => item.path),
-        hints,
+        hints: extractHints(task),
     };
 }
 

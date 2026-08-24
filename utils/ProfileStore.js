@@ -51,8 +51,8 @@ class ProfileStore {
                 username: '',
                 password: '',
             },
-            fingerprint: profileData.fingerprint || {},
-            startupUrl: profileData.startupUrl || 'about:blank',
+            fingerprint: profileData.fingerprint || { mode: 'open' },
+            startupUrl: profileData.startupUrl || '',
         };
         profiles.push(profile);
         await this.saveAll(profiles);
@@ -84,6 +84,22 @@ class ProfileStore {
 
     async setStatus(id, status) {
         return this.update(id, { status });
+    }
+
+    async idleAllRunning() {
+        const profiles = await this.loadAll();
+        let changed = false;
+        const now = new Date().toISOString();
+        for (const profile of profiles) {
+            if (profile.status === 'running' || profile.chromePid) {
+                profile.status = 'idle';
+                profile.chromePid = null;
+                profile.updatedAt = now;
+                changed = true;
+            }
+        }
+        if (changed) await this.saveAll(profiles);
+        return profiles;
     }
 
     getProfileDir(profilesRoot, id) {

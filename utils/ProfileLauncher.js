@@ -1,4 +1,5 @@
 const RealChromeController = require('../chrome/RealChromeController');
+const { killProfileChrome } = require('../chrome/profileProcess');
 
 class ProfileLauncher {
     constructor({ profileStore, settingsStore, chromeResolver, projectPath, runningBrowsers, profileOwners, onStatus }) {
@@ -11,110 +12,104 @@ class ProfileLauncher {
         this.onStatus = onStatus;
     }
 
-    getOwner(profileId) {
-        return this.profileOwners.get(profileId) || null;
-    }
-
     isLocked(profileId) {
-        return this.profileOwners.has(profileId);
-    }
-
-    acquire(profileId, owner) {
-        if (this.profileOwners.has(profileId)) {
-            const current = this.profileOwners.get(profileId);
-            return { ok: false, owner: current };
-        }
-        this.profileOwners.set(profileId, owner);
-        return { ok: true };
-    }
-
-    release(profileId) {
-        this.profileOwners.delete(profileId);
+        return this.runningBrowsers.has(profileId);
     }
 
     async open(profileId, owner, { connect = true, startupUrl } = {}) {
-        const existing = this.profileOwners.get(profileId);
-        if (existing && existing.id !== owner.id) {
-            throw new Error(`Profile đang được dùng bởi ${existing.label}`);
-        }
-
         if (this.runningBrowsers.has(profileId)) {
             const entry = this.runningBrowsers.get(profileId);
-            if (entry.owner.id !== owner.id) {
-                throw new Error(`Profile đang được dùng bởi ${entry.owner.label}`);
+            try {
+                if (connect) await entry.controller.connect();
+                return entry.controller;
+            } catch {
+                await this.close(profileId);
             }
-            if (connect && !entry.controller.page && !entry.controller.nativeMode) {
-                await entry.controller.connect();
-            }
-            return entry.controller;
-        }
-
-        if (!existing) {
-            this.profileOwners.set(profileId, owner);
         }
 
         const profile = await this.profileStore.getById(profileId);
         if (!profile) throw new Error('Không tìm thấy profile');
-
-        const fpMode = profile.fingerprint?.mode || 'consistent';
-        const automationOwner = owner.type === 'process' || owner.type === 'youtube-process';
-        if (automationOwner && fpMode === 'native') {
-            this.profileOwners.delete(profileId);
-            throw new Error('Auto upload cần profile ở chế độ Consistent hoặc Stealth (không dùng Native)');
-        }
 
         const settings = await this.settingsStore.load();
         const profilesRoot = this.settingsStore.getProfilesRoot(settings, this.projectPath);
         const channel = profile.chromeChannel || settings.chromeChannel || 'stable';
         const { path: chromePath } = this.chromeResolver.resolve(channel, settings.chromePath);
         const profilePath = this.profileStore.getProfileDir(profilesRoot, profileId);
-        const extensions = (settings.extensions || []).map(e => e.path).filter(Boolean);
 
-        const launchProfile = {
-            ...profile,
-            startupUrl: startupUrl || profile.startupUrl || 'about:blank',
-        };
+        killProfileChrome(profilePath, profile.chromePid);
 
         const controller = new RealChromeController({
-            profile: launchProfile,
+            profile: {
+                ...profile,
+                startupUrl: startupUrl || profile.startupUrl || settings.defaultStartupUrl || '',
+            },
             profilePath,
             chromePath,
-            extensions,
+            extensions: (settings.extensions || []).map((item) => item.path).filter(Boolean),
             onClose: async () => {
                 this.runningBrowsers.delete(profileId);
                 this.profileOwners.delete(profileId);
-                await this.profileStore.setStatus(profileId, 'idle');
+                await this.profileStore.update(profileId, { status: 'idle', chromePid: null });
                 this.onStatus?.('profile-status', { id: profileId, status: 'idle' });
             },
         });
 
+        this.profileOwners.set(profileId, owner);
         await controller.launch();
-        if (connect && !controller.nativeMode) {
-            await controller.connect();
+        try {
+            if (connect) await controller.connect();
+        } catch (error) {
+            await controller.close().catch(() => {});
+            throw error;
         }
 
         this.runningBrowsers.set(profileId, { controller, owner });
-        await this.profileStore.setStatus(profileId, 'running');
+        await this.profileStore.update(profileId, {
+            status: 'running',
+            chromePid: controller.chromePid || null,
+        });
         this.onStatus?.('profile-status', { id: profileId, status: 'running' });
-
         return controller;
     }
 
-    async close(profileId, ownerId) {
+    async profileDir(profileId) {
+        const settings = await this.settingsStore.load();
+        const root = this.settingsStore.getProfilesRoot(settings, this.projectPath);
+        return this.profileStore.getProfileDir(root, profileId);
+    }
+
+    async close(profileId) {
         const entry = this.runningBrowsers.get(profileId);
-        if (!entry) {
-            this.profileOwners.delete(profileId);
-            await this.profileStore.setStatus(profileId, 'idle');
-            return;
+        const profile = await this.profileStore.getById(profileId);
+        const dir = await this.profileDir(profileId);
+        if (entry) {
+            await entry.controller.close();
+        } else {
+            killProfileChrome(dir, profile?.chromePid);
         }
-        if (entry.owner.id !== ownerId) {
-            throw new Error('Không thể đóng profile của tiến trình khác');
-        }
-        await entry.controller.close();
         this.runningBrowsers.delete(profileId);
         this.profileOwners.delete(profileId);
-        await this.profileStore.setStatus(profileId, 'idle');
+        await this.profileStore.update(profileId, { status: 'idle', chromePid: null });
         this.onStatus?.('profile-status', { id: profileId, status: 'idle' });
+    }
+
+    async reclaimAll() {
+        const settings = await this.settingsStore.load();
+        const root = this.settingsStore.getProfilesRoot(settings, this.projectPath);
+        const profiles = await this.profileStore.loadAll();
+        for (const profile of profiles) {
+            killProfileChrome(this.profileStore.getProfileDir(root, profile.id), profile.chromePid);
+        }
+        await this.profileStore.idleAllRunning();
+        for (const profile of profiles) {
+            this.onStatus?.('profile-status', { id: profile.id, status: 'idle' });
+        }
+    }
+
+    async closeAll() {
+        const ids = [...this.runningBrowsers.keys()];
+        await Promise.allSettled(ids.map((id) => this.close(id)));
+        await this.reclaimAll();
     }
 }
 
