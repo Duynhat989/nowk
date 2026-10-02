@@ -185,12 +185,13 @@ class ChatGptAgent {
             return { ok: Boolean(read()), chars: read().length };
         }, text, INPUT_SELECTORS);
 
-        if (!filled.ok || filled.chars < 2) {
+        if (!filled.ok || filled.chars < Math.floor(String(text || '').length * 0.9)) {
             await this.insertViaCdp(page, text);
         }
-        const state = await this.waitForComposer(page, (s) => s.chars > 0, 2500);
-        if (!state.chars) {
-            throw new Error('Ô nhập ChatGPT vẫn trống. Click vào ô chat một cái rồi gửi lại.');
+        const want = String(text || '').length;
+        const state = await this.waitForComposer(page, (s) => s.chars >= Math.floor(want * 0.9), Math.min(12000, 2500 + want / 8));
+        if (state.chars < Math.max(8, Math.floor(want * 0.85))) {
+            throw new Error(`Ô nhập ChatGPT thiếu prompt (${state.chars}/${want} ký tự). Click vào ô chat rồi gửi lại.`);
         }
         return state;
     }
@@ -212,7 +213,11 @@ class ChatGptAgent {
                     return;
                 }
             }, INPUT_SELECTORS);
-            await session.send('Input.insertText', { text });
+            const value = String(text || '');
+            const chunk = 400;
+            for (let i = 0; i < value.length; i += chunk) {
+                await session.send('Input.insertText', { text: value.slice(i, i + chunk) });
+            }
         } catch {
             // ignore
         } finally {

@@ -18,13 +18,49 @@ const START_SETTLE_MS = 5000;
 
 const START_RE = /\b(npm(\s+run)?\s+(dev|start|serve|preview|watch)|yarn(\s+run)?\s+(dev|start|serve|preview|watch)|pnpm(\s+run)?\s+(dev|start|serve|preview|watch)|bun(\s+run)?\s+(dev|start|serve|preview|watch)|npx\s+(vite|next|nuxt|astro|remix|webpack|http-server|live-server|serve)\b|uvicorn|gunicorn|fastapi(\s+dev)?|flask run|php artisan serve|cargo run|go run|nodemon|vite(\s+preview)?|next(\s+(dev|start|preview))?|nuxt(\s+dev)?|astro(\s+dev)?|ng serve|webpack serve|http-server|live-server|remix-serve)\b/i;
 const START_SCRIPT_RE = /\b(python|python3|py)\s+[^\n]*\b(main|app|manage|server|run)\.py\b|\b(node|deno)\s+[^\n]*\b(server|index|app|main)\.(js|mjs|cjs|ts)\b/i;
-const CHECK_RE = /\b(py_compile|compileall|pytest|unittest|node --check|eslint|tsc)\b/i;
+const CHECK_RE = /\b(py_compile|compileall|pytest|unittest|node --check|eslint|tsc|npm(\s+run)?\s+build|vite build|next build|nuxt build)\b/i;
 const READY_RE = /localhost:\d+|127\.0\.0\.1:\d+|0\.0\.0\.0:\d+|ready in\b|compiled successfully|watching for|local:\s*https?:\/\/|dev server running|listening on|started server|vite preview|application startup complete/i;
 
 function isStartCommand(command) {
     const cmd = String(command || '').trim();
     if (CHECK_RE.test(cmd)) return false;
     return START_RE.test(cmd) || START_SCRIPT_RE.test(cmd);
+}
+
+function waitMarker(id) {
+    return `NOWK_RC_${id}`;
+}
+
+function wrapWaitCommand(cmd, marker) {
+    const safe = String(cmd || '').trim();
+    if (isWin) return `${safe} & echo ${marker}:%ERRORLEVEL%`;
+    return `${safe}; printf '\\n${marker}:%s\\n' "$?"`;
+}
+
+function parseWaitCode(output, marker) {
+    const match = String(output || '').match(new RegExp(`(?:^|\\n)${marker}:(\\d+)\\s*(?:\\n|$)`));
+    if (!match) return null;
+    return Number(match[1]);
+}
+
+function cleanWaitOutput(output, marker) {
+    return stripAnsi(output)
+        .replace(/\r/g, '')
+        .replace(new RegExp(`(?:^|\\n)${marker}:\\d+\\s*`, 'g'), '\n')
+        .trim() || '(no output)';
+}
+
+function isOnlyCommandEcho(output, cmd) {
+    const body = stripAnsi(output).replace(/\r/g, '').trim();
+    if (!body) return true;
+    const needle = String(cmd || '').trim();
+    const lines = body.split('\n').map((line) => line.trim()).filter(Boolean);
+    if (!lines.length) return true;
+    return lines.every((line) => (
+        line === needle
+        || line.startsWith(`$ ${needle}`)
+        || (line.includes(needle) && line.length < needle.length + 24 && !/\d/.test(line.replace(needle, '')))
+    ));
 }
 
 function shellEnv(cols, rows) {
@@ -344,9 +380,11 @@ class TerminalService {
     }
 
     looksIdle(text) {
-        const tail = stripAnsi(text).trim().split('\n').slice(-4).join('\n');
-        if (READY_RE.test(tail) && !/[$#%>]\s*$/.test(tail)) return false;
-        return /[$#%>]\s*$/.test(tail) || !READY_RE.test(tail);
+        const raw = stripAnsi(text);
+        const lastLine = raw.trim().split('\n').filter(Boolean).at(-1) || '';
+        const atPrompt = /[%$#❯>]\s*$/.test(lastLine);
+        if (READY_RE.test(raw.slice(-4000)) && !atPrompt) return false;
+        return atPrompt;
     }
 
     isIdleSession(session) {
@@ -584,6 +622,7 @@ class TerminalService {
         }
 
         const id = ++this.seq;
+        const marker = waitMarker(id);
         const startLen = (session.log || '').length;
         const startedAt = Date.now();
         this.emit({
@@ -595,7 +634,8 @@ class TerminalService {
             mode: asBackground ? 'start' : 'wait',
             sessionId,
         });
-        const payload = isWin ? `${cmd}\r\n` : `${cmd}\n`;
+        const typed = asBackground ? cmd : wrapWaitCommand(cmd, marker);
+        const payload = isWin ? `${typed}\r\n` : `${typed}\n`;
         if (!this.writeToSession(payload, sessionId)) {
             return asBackground
                 ? this.runBackground({ cwd, command: cmd, source, settleMs, sessionId })
@@ -627,6 +667,27 @@ class TerminalService {
                 });
             };
 
+            const finishWait = (code, output) => {
+                const bad = Number(code) !== 0 || logLooksBad(output);
+                this.emit({
+                    type: 'exit',
+                    id,
+                    code: bad ? (Number(code) || 1) : 0,
+                    ok: !bad,
+                    source,
+                    mode: 'wait',
+                    sessionId,
+                    silent: true,
+                });
+                finish({
+                    ok: !bad,
+                    type: 'run_command',
+                    command: cmd,
+                    running: false,
+                    result: cleanWaitOutput(output, marker).slice(0, MAX_AGENT),
+                });
+            };
+
             const timer = setInterval(() => {
                 const nowLen = (session.log || '').length;
                 if (nowLen !== lastLen) {
@@ -641,25 +702,22 @@ class TerminalService {
                         this.watchJob(job, { reason: 'error' });
                     }
                 }
+                if (asBackground) return;
                 const output = outputOf();
-                if (!asBackground && output.trim() && Date.now() - lastChange > 1400 && Date.now() - startedAt > 500) {
-                    const bad = logLooksBad(output);
-                    this.emit({
-                        type: 'exit',
-                        id,
-                        code: bad ? 1 : 0,
-                        ok: !bad,
-                        source,
-                        mode: 'wait',
-                        sessionId,
-                    });
-                    finish({
-                        ok: !bad,
-                        type: 'run_command',
-                        command: cmd,
-                        running: false,
-                        result: (output.trim() || '(no output)').slice(0, MAX_AGENT),
-                    });
+                const code = parseWaitCode(output, marker);
+                if (code !== null) {
+                    finishWait(code, output);
+                    return;
+                }
+                const quiet = Date.now() - lastChange;
+                const elapsed = Date.now() - startedAt;
+                if (
+                    elapsed > 4000
+                    && quiet > 2800
+                    && !isOnlyCommandEcho(output, cmd)
+                    && this.looksIdle(output)
+                ) {
+                    finishWait(logLooksBad(output) ? 1 : 0, output);
                 }
             }, 160);
 
@@ -671,22 +729,12 @@ class TerminalService {
                 setTimeout(() => {
                     if (finished) return;
                     const output = outputOf();
-                    this.emit({
-                        type: 'exit',
-                        id,
-                        code: 0,
-                        ok: true,
-                        source,
-                        mode: 'wait',
-                        sessionId,
-                    });
-                    finish({
-                        ok: !logLooksBad(output),
-                        type: 'run_command',
-                        command: cmd,
-                        running: false,
-                        result: (output.trim() || '(timeout)').slice(0, MAX_AGENT),
-                    });
+                    const code = parseWaitCode(output, marker);
+                    if (code !== null) {
+                        finishWait(code, output);
+                        return;
+                    }
+                    finishWait(isOnlyCommandEcho(output, cmd) ? 1 : (logLooksBad(output) ? 1 : 0), output);
                 }, WAIT_TIMEOUT_MS);
             }
         });
@@ -751,7 +799,7 @@ class TerminalService {
                 const text = typeof chunk === 'string' ? chunk : String(chunk || '');
                 output = (output + text).slice(-MAX_STORE);
                 if (job) job.log = (job.log + text).slice(-MAX_STORE);
-                if (READY_RE.test(output)) setTimeout(promote, 350);
+                if (isStartCommand(cmd) && READY_RE.test(output)) setTimeout(promote, 350);
                 if (job?.ready && logLooksBad(text)) this.watchJob(job, { reason: 'error' });
             };
             child.stdout?.on('data', store);
@@ -777,7 +825,12 @@ class TerminalService {
             });
 
             setTimeout(() => {
-                if (!finished && (asJob ? job?.child === child : this.waitChild === child) && output.trim()) promote();
+                if (
+                    !finished
+                    && isStartCommand(cmd)
+                    && (asJob ? job?.child === child : this.waitChild === child)
+                    && output.trim()
+                ) promote();
             }, START_SETTLE_MS + 3000);
 
             setTimeout(() => {

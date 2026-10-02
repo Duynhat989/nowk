@@ -20,7 +20,7 @@ const SEND_SELECTORS = [
     'button[type="submit"]',
 ];
 
-const INSERT_CHUNK = 800;
+const INSERT_CHUNK = 400;
 
 function sleep(ms) {
     return new Promise((r) => setTimeout(r, ms));
@@ -34,9 +34,9 @@ function composerMatches(got, want) {
     const have = normalizePrompt(got);
     const need = normalizePrompt(want);
     if (!need) return true;
-    if (have.length < Math.max(24, Math.floor(need.length * 0.72))) return false;
-    const head = need.slice(0, Math.min(48, need.length));
-    const tail = need.slice(-Math.min(48, need.length));
+    if (have.length < Math.max(24, Math.floor(need.length * 0.92))) return false;
+    const head = need.slice(0, Math.min(64, need.length));
+    const tail = need.slice(-Math.min(64, need.length));
     return have.includes(head) && (need.length < 80 || have.includes(tail));
 }
 
@@ -203,11 +203,15 @@ class GeminiAgent {
         state = await this.readComposer(page);
         if (!composerMatches(state.text, value)) {
             await this.clearComposer(page);
-            await this.insertDom(page, value);
+            await this.insertViaCdp(page, value);
             state = await this.readComposer(page);
         }
-        if (!composerMatches(state.text, value) && state.chars < Math.min(20, value.length)) {
-            await this.insertViaCdp(page, value);
+        if (!composerMatches(state.text, value)) {
+            await this.clearComposer(page);
+            await this.insertDom(page, value);
+            if (!composerMatches((await this.readComposer(page)).text, value)) {
+                await this.insertViaCdp(page, value);
+            }
             state = await this.readComposer(page);
         }
 
@@ -217,7 +221,9 @@ class GeminiAgent {
             Math.min(14000, 2800 + value.length / 6),
         );
         if (!composerMatches(filled.text, value)) {
-            throw new Error('Ô nhập Gemini bị dính chữ cũ / nhập thiếu. Click vào ô chat, xóa hết, rồi gửi lại.');
+            throw new Error(
+                `Ô nhập Gemini thiếu prompt (${filled.chars}/${value.length} ký tự). Click vào ô chat, xóa hết, rồi gửi lại.`,
+            );
         }
 
         await sleep(Math.min(900, 220 + Math.floor(value.length / 60)));
@@ -281,12 +287,13 @@ class GeminiAgent {
             const selection = window.getSelection();
             selection.removeAllRanges();
             selection.addRange(range);
+            const chunk = 400;
             try {
-                document.execCommand('insertText', false, value);
+                document.execCommand('delete');
+                for (let i = 0; i < value.length; i += chunk) {
+                    document.execCommand('insertText', false, value.slice(i, i + chunk));
+                }
             } catch {
-                // ignore
-            }
-            if (read().length < Math.min(24, value.length)) {
                 try {
                     const dt = new DataTransfer();
                     dt.setData('text/plain', value);
@@ -331,14 +338,10 @@ class GeminiAgent {
             }, INPUT_SELECTORS);
 
             const value = String(text || '');
-            if (value.length <= 12000) {
-                await session.send('Input.insertText', { text: value });
-            } else {
-                for (let i = 0; i < value.length; i += INSERT_CHUNK) {
-                    this.throwIfCancelled();
-                    await session.send('Input.insertText', { text: value.slice(i, i + INSERT_CHUNK) });
-                    await sleep(40);
-                }
+            for (let i = 0; i < value.length; i += INSERT_CHUNK) {
+                this.throwIfCancelled();
+                await session.send('Input.insertText', { text: value.slice(i, i + INSERT_CHUNK) });
+                if (i + INSERT_CHUNK < value.length) await sleep(30);
             }
         } catch {
             // Chrome window may reject CDP input; DOM path already ran.

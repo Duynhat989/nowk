@@ -31,7 +31,9 @@ edit_file {path, old, new} | create_file {path, content} | delete_file {path} | 
 run_command {command} | run_start {command} | run_test {command}
 browser_open {url} | screenshot {url?}
 
-Loop: split ALL user requirements → classify each (feature/bugfix/update/...) → follow THAT kind's playbook → next requirement → done only after the last.
+Loop: READ first → fill "plan" from what you read → then edit ONLY according to that plan. One file per JSON.
+- Each JSON: at most ONE path among create_file / edit_file / delete_file. Many edit_file hunks on THAT same path are OK. Next file = next JSON.
+- Do not emit edit_file / create_file until you have read_file (or retrieve) on the target. First JSON is survey/read only + a real plan[].
 - Count every ask. Do not drop any. Do not treat them all the same.
 - FEATURE: survey RELATION TREE first (who owns state, who renders, who writes), then implement on that tree. Never duplicate state.
 - BUGFIX: locate + name the root cause, read callers, THEN fix the cause. No blind patches.
@@ -45,6 +47,7 @@ Loop: split ALL user requirements → classify each (feature/bugfix/update/...) 
 - Do not edit package.json/README to mark done. No fake finalize steps.
 - If a tool returns an error (missing file, old mismatch, audit fail): FIX it now. create_file if the path does not exist. Never done=true while errors remain.
 - STYLE/restyle of "all UI": edit every Vue/CSS in RELATION TREE. One extra theme file is not enough.
+- Never create *Enhanced / *New / *Correct / *Fixed copies of a component. edit_file the existing file (TheHeader.vue not TheHeaderEnhanced.vue).
 - edit_file: copy old EXACTLY from numbered lines. Do not redeclare the same identifier.
 - When the request actually works (UI + behavior + shared data): actions=[] done=true.
 - Never say you lack tools.
@@ -109,6 +112,15 @@ function packageEditAllowed(task, action) {
     return false;
 }
 
+function cloneOriginalPath(rel) {
+    const path = String(rel || '').replace(/\\/g, '/');
+    const match = path.match(/^(.*?)(Enhanced|Improved|Updated|New|Correct|Fixed|Copy|Backup|Alt|V2|V3)(\.(vue|js|ts|jsx|tsx|css))$/i);
+    if (!match || !match[1]) return '';
+    const stem = match[1].replace(/[-_]+$/, '');
+    if (!stem.split('/').pop()) return '';
+    return `${stem}${match[3]}`;
+}
+
 function skipWriteReason(task, action) {
     const rel = String(action.path || '');
     if (!rel) return '';
@@ -118,10 +130,43 @@ function skipWriteReason(task, action) {
     if (/(^|\/)LICENSE$/i.test(rel) && !/license/i.test(task)) {
         return `SKIP ${rel}: task không yêu cầu sửa license.`;
     }
+    const original = cloneOriginalPath(rel);
+    if (original && action.type === 'create_file' && !rel.toLowerCase().includes(String(task || '').toLowerCase())) {
+        return `SKIP ${rel}: không tạo bản sao. Sửa file gốc bằng edit_file "${original}".`;
+    }
     if (/(^|\/)package\.json$/i.test(rel) && !packageEditAllowed(task, action)) {
         return 'SKIP package.json: không sửa name/description/author/homepage để đánh dấu xong.';
     }
     return '';
+}
+
+function writeRel(action) {
+    if (!/create_file|edit_file|delete_file/.test(action?.type || '')) return '';
+    return String(action.path || '').replace(/\\/g, '/');
+}
+
+function capOneFile(actions) {
+    const list = Array.isArray(actions) ? actions : [];
+    const writes = list.filter((item) => writeRel(item));
+    if (writes.length <= 1) return { actions: list, skipped: [] };
+    const keepPath = writeRel(writes[0]);
+    const skipped = [];
+    const next = [];
+    let kept = false;
+    for (const item of list) {
+        const rel = writeRel(item);
+        if (!rel) {
+            next.push(item);
+            continue;
+        }
+        if (rel === keepPath) {
+            next.push(item);
+            kept = true;
+            continue;
+        }
+        skipped.push(item);
+    }
+    return { actions: kept ? next : list, skipped };
 }
 
 function relatedSurfaces(state) {
@@ -149,6 +194,11 @@ function wiringLeft(state, task) {
     if (!wantsFileWork(task)) return false;
     if (state.wiringFail || state.behaviorFail) return true;
     if (behaviorLeft(state, task)) return true;
+    const req = state.currentRequirement?.() || {};
+    const blob = `${task || ''} ${req.text || ''}`;
+    if (/bugfix|thiếu thẻ|end tag|syntax|compile|pre-transform/i.test(blob) || req.kind === 'bugfix') {
+        if ((state.filesChanged || []).length) return false;
+    }
     const related = relatedSurfaces(state);
     if (related.length < 2) return false;
     const changed = state.filesChanged || [];
@@ -165,6 +215,14 @@ function needsEvidence(state, task) {
     if (wantsVerify(task) && !hasRun(state)) return true;
     if (wantsFileWork(task) && (state.filesChanged || []).length && !hasRun(state)) return true;
     return false;
+}
+
+function acceptModelDone(state, parsed) {
+    if (!looksModelDone(parsed)) return false;
+    if ((parsed.actions || []).length) return false;
+    if ((state.truncated || []).length) return false;
+    if ((state.currentErrors || []).length || state.batchFailed) return false;
+    return true;
 }
 
 function taskSatisfied(state, task) {
@@ -248,7 +306,11 @@ function dropDuplicateReads(actions, state) {
 function workLeft(state, task) {
     if ((state.truncated || []).length) return true;
     if ((state.currentErrors || []).length || state.batchFailed) return true;
-    if ((state.requirements || []).length && state.reqIndex < state.requirements.length) return true;
+    const reqs = state.requirements || [];
+    if (reqs.length && state.reqIndex < reqs.length) {
+        const req = reqs[state.reqIndex];
+        if (req?.status !== 'completed') return true;
+    }
     if (needsEvidence(state, task)) return true;
     if (wantsVerify(task) && !wantsFileWork(task)) return !hasRun(state);
     if (wantsFileWork(task) && !(state.filesChanged || []).length) return true;
@@ -641,8 +703,11 @@ ${TURN}`;
     }
 
     remainingPlanText(state) {
-        if (state.requirements?.length) {
-            return formatRequirements(state.requirements, state.reqIndex);
+        const reqs = state.requirements || [];
+        if (reqs.length) {
+            if (state.reqIndex >= reqs.length) return '';
+            if (reqs[state.reqIndex]?.status === 'completed' && state.reqIndex === reqs.length - 1) return '';
+            return formatRequirements(reqs, state.reqIndex);
         }
         const pending = state.pendingPlan().filter((item) => (
             !state.isFillerPlan?.(item) && !state.isRunPlan?.(item) && !state.isReadOnlyPlan?.(item)
@@ -851,7 +916,7 @@ ${TURN}`;
             ? `Pending plan steps — do them now (several actions in one JSON):\n${leftover}`
             : (mentioned.length
                 ? `Files still needed: ${mentioned.join(', ')}.`
-                : 'Continue remaining edits. Batch multiple edit_file in one JSON.');
+                : 'Continue remaining edits. One file per JSON. Follow the plan you already wrote.');
         return `${PROTOCOL}
 
 Continue TASK:
@@ -913,11 +978,23 @@ ${TURN}`;
 
     buildKeepWorkingPrompt(state, task) {
         const leftover = uncoveredPlan(state).map((item, idx) => `${idx + 1}. ${item.task}`).join('\n');
+        const remaining = this.remainingPlanText(state);
         const changed = (state.filesChanged || []).join(', ') || '(none)';
         const current = state.currentRequirement();
-        const reqHint = state.requirements.length && current
+        const reqHint = state.requirements.length && current && state.reqIndex < state.requirements.length
             ? `\n${formatKindBlock(state)}\nYou are on requirement ${state.reqIndex + 1}/${state.requirements.length} [${kindMeta(current.kind).label}]: ${current.text}\n`
             : '';
+        if (!leftover && !remaining) {
+            return `${PROTOCOL}
+
+TASK:
+${task}
+${reqHint}
+Files already written: ${changed}
+
+No pending plan files. Do not create TheHeaderEnhanced.vue or other *Enhanced/*Correct copies. edit_file the existing file. If the error is fixed, emit run_start or actions=[] done=true.
+${TURN}`;
+        }
         return `${PROTOCOL}
 
 TASK:
@@ -925,7 +1002,7 @@ ${task}
 ${reqHint}
 You only changed: ${changed}
 That is not enough. These plan steps still have untouched files:
-${leftover || this.remainingPlanText(state) || '(more views/components still old)'}
+${leftover || remaining}
 
 Emit the remaining edit_file / create_file NOW for THIS task only.
 Do not rewrite the plan. Do not edit package.json/README to mark done. done=false.
@@ -1271,11 +1348,9 @@ ${TURN}`;
             return raw;
         };
 
+        let writeGateNote = '';
+
         const firstPrompt = () => `${PROTOCOL}
-
-${kit.prompt}
-
-${state.projectBrief || '(no retrieved context)'}
 
 TASK:
 ${task}
@@ -1285,9 +1360,13 @@ ${formatRequirements(state.requirements, state.reqIndex)}
 
 ${formatKindBlock(state)}
 
+${state.projectBrief || '(no retrieved context)'}
+
+${kit.prompt}
+
 ${wantsVerify(task) && !wantsFileWork(task) && state.requirements.length <= 1
         ? 'This task is only to run the app. Emit run_start or run_command now, then done=true. Do not edit files.'
-        : 'Follow the KIND playbook for requirement 1. Survey/diagnose RELATION TREE first. done=false until every requirement is done.'} ${TURN}`;
+        : 'Requirement 1: READ first (read_file / retrieve). Fill plan[] from the code. Do not edit in this first JSON. Later: one file per JSON, only what the plan says.'} ${TURN}`;
 
         const resultPrompt = (results) => {
             const onlyReads = (results || []).every((item) => READ_TOOLS.has(item.type) || item.type === 'already_read');
@@ -1321,8 +1400,9 @@ ${wantsVerify(task) && !wantsFileWork(task) && state.requirements.length <= 1
 TOOL RESULTS:
 ${blocks || '(none)'}
 ${extra}
+${writeGateNote}
 
-Continue the same TASK. Do not edit a file just because you read it. If the request is done, actions=[] done=true.
+Continue the same TASK. One file per JSON after you have read it and filled plan[]. If the request is done, actions=[] done=true.
 ${TURN}`;
         };
 
@@ -1396,6 +1476,36 @@ ${TURN}`;
             parsed.actions = attachReadRanges(parsed.actions, parsed);
             const deduped = dropDuplicateReads(parsed.actions, state);
             parsed.actions = deduped.actions;
+            writeGateNote = '';
+            const oneFile = capOneFile(parsed.actions);
+            parsed.actions = oneFile.actions;
+            if (oneFile.skipped.length) {
+                const kept = writeRel(oneFile.actions.find((item) => writeRel(item))) || 'file đầu';
+                this.emit('step', `Chỉ sửa 1 file/lượt — giữ ${kept}`);
+                writeGateNote += `\nONE FILE PER TURN. Kept ${kept}. Dropped: ${oneFile.skipped.map((item) => writeRel(item)).join(', ')}. Next JSON = next file from your plan.`;
+            }
+            const writesNow = parsed.actions.filter((item) => writeRel(item));
+            if (writesNow.length && !(state.filesRead || []).length) {
+                parsed.actions = parsed.actions.filter((item) => !writeRel(item));
+                this.emit('step', 'Chặn sửa — đọc code rồi mới plan, rồi mới edit');
+                writeGateNote += '\nREAD FIRST. No read_file yet. Emit read_file on the target, fill plan[], then edit that one file in a later JSON.';
+            }
+            if (writeGateNote && !parsed.actions.length) {
+                raw = await send(`${PROTOCOL}
+
+TASK:
+${task}
+
+${formatKindBlock(state)}
+${writeGateNote}
+
+Return ONE JSON. Read or plan first if needed. At most one file write.
+${TURN}`);
+                parsed = this.ingest(state, raw);
+                parsed.done = false;
+                parsed.claimedDone = false;
+                continue;
+            }
             const gate = kindProgress(state);
             if (!gate.ok && (gate.reason === 'survey' || gate.reason === 'diagnose')) {
                 const blocked = parsed.actions.filter((item) => WRITE_TOOLS.has(item.type));
@@ -1437,7 +1547,21 @@ ${TURN}`);
             }
 
             if (!parsed.actions.length) {
-                parsed = this.injectVerify(tools, state, task, parsed);
+                if (!looksModelDone(parsed) || (needsEvidence(state, task) && !hasRun(state))) {
+                    parsed = this.injectVerify(tools, state, task, parsed);
+                }
+            }
+            if (!parsed.actions.length && acceptModelDone(state, parsed)) {
+                while (state.reqIndex < (state.requirements || []).length) {
+                    state.advanceRequirement();
+                }
+                this.emitPlan(state);
+                if (needsEvidence(state, task) && state.filesChanged.length && state.terminalChecks < 1) {
+                    parsed = await this.afterEditsCheck(tools, state, task, send, parsed);
+                    if (parsed.actions.length) continue;
+                }
+                this.markFinished(state, task);
+                break;
             }
             if (!parsed.actions.length) {
                 if (this.shouldAdvanceRequirement(state, parsed, task, empty)) {
@@ -1463,7 +1587,17 @@ ${TURN}`);
                 if (workLeft(state, task) && empty < 8) {
                     empty += 1;
                     const progress = kindProgress(state);
+                    const leftover = uncoveredPlan(state);
+                    const remaining = this.remainingPlanText(state);
                     const hasErrors = Boolean(state.batchFailed || (state.currentErrors || []).length);
+                    if (!hasErrors && !leftover.length && !remaining && looksModelDone(parsed)) {
+                        if (state.filesChanged.length && state.terminalChecks < 1) {
+                            parsed = await this.afterEditsCheck(tools, state, task, send, parsed);
+                            if (parsed.actions.length) continue;
+                        }
+                        this.markFinished(state, task);
+                        break;
+                    }
                     this.emit('status', hasErrors
                         ? 'Có lỗi — sửa tiếp, không dừng'
                         : progress.reason === 'diagnose'
@@ -1490,6 +1624,23 @@ ${TURN}`);
                     if (parsed.actions.length) continue;
                 }
                 if (workLeft(state, task)) {
+                    if (empty < 12) {
+                        empty += 1;
+                        this.emit('status', 'JSON thiếu — gửi lại prompt ngắn, không dừng');
+                        raw = await send(`${PROTOCOL}
+
+TASK:
+${task}
+
+${formatKindBlock(state)}
+
+Previous reply was incomplete/not JSON. Return ONE JSON with actions. done=false.
+${TURN}`);
+                        parsed = this.ingest(state, raw);
+                        parsed.done = false;
+                        parsed.claimedDone = false;
+                        continue;
+                    }
                     this.emit('status', 'Agent không ra tool đúng định dạng.');
                     break;
                 }
